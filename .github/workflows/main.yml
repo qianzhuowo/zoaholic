@@ -9,6 +9,7 @@ name: Docker Build and Publish Docker Image
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
   build-and-push:
