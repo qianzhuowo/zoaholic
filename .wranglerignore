@@ -1,0 +1,62 @@
+# Python virtual environments
+.venv/
+venv/
+ENV/
+__pycache__/
+*.pyc
+*.pyd
+*.so
+
+# Frontend source (already built to static/)
+frontend/
+
+# Tests & docs
+test/
+core/test/
+docs/
+
+# Git & CI
+.git/
+.github/
+
+# Docker
+Dockerfile
+Dockerfile.debug
+docker-compose.yml
+docker-compose-*.yml
+.dockerignore
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+
+# Config / Secrets
+.env
+.env.*
+api.yaml
+api.yml
+formatted.yaml
+data/
+postgres_data/
+
+# Misc
+.wrangler/
+.aider*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+uv.lock
+*.pex
+LICENSE
+README.md
+README_EN.md
