@@ -1,0 +1,38 @@
+api.json
+*.yaml
+.env
+__pycache__
+.vscode
+node_modules
+.wrangler
+.pytest_cache
+*.jpg
+# *.json
+!vercel.json
+# *.png
+*.db
+.aider*
+.idea
+docker-compose-*.yml
+data/
+*.db-wal
+*.db-shm
+postgres_data/
+alembic/
+alembic.ini
+
+.github/
+test/
+.dockerignore
+.gitignore
+docker-compose.yml
+Dockerfile
+Dockerfile.debug
+
+# local built frontend output (will be built in Dockerfile)
+static/
+frontend/dist/
+
+*.md
+*.toml
+!pyproject.toml
