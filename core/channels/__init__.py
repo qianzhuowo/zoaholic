@@ -24,6 +24,7 @@ from . import gemini_channel
 from . import claude_channel
 from . import azure_channel
 from . import aws_channel
+from . import vertex_channel
 from . import openrouter_channel
 from . import cloudflare_channel
 
@@ -34,17 +35,9 @@ gemini_channel.register()
 claude_channel.register()
 azure_channel.register()
 aws_channel.register()
+vertex_channel.register()
 openrouter_channel.register()
 cloudflare_channel.register()
-
-try:
-    from . import vertex_channel
-
-    vertex_channel.register()
-except ImportError as e:  # pragma: no cover
-    from core.log_config import logger
-
-    logger.warning("Skip loading vertex channel due to missing optional dependency: %s", e)
 
 __all__ = [
     # 类型定义

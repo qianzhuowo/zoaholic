@@ -9,17 +9,10 @@ import string
 import asyncio
 import traceback
 from time import time
-try:
-    from PIL import Image
-except Exception:  # pragma: no cover
-    Image = None
+from PIL import Image
 from fastapi import HTTPException
 from collections import defaultdict
-try:
-    from httpx_socks import AsyncProxyTransport
-except Exception:  # pragma: no cover
-    AsyncProxyTransport = None
-
+from httpx_socks import AsyncProxyTransport
 from urllib.parse import urlparse, urlunparse
 
 from .log_config import logger
@@ -192,11 +185,6 @@ def get_proxy(proxy, client_config = {}):
 
         if scheme == 'socks5':
             proxy = proxy.replace('socks5h://', 'socks5://')
-            if AsyncProxyTransport is None:
-                raise ValueError(
-                    "Detected socks5 proxy but optional dependency 'httpx-socks' is not installed. "
-                    "Please install httpx-socks or use http/https proxy."
-                )
             transport = AsyncProxyTransport.from_url(proxy)
             client_config["transport"] = transport
             # print("proxy", proxy)
@@ -946,28 +934,12 @@ async def generate_no_stream_response(timestamp, model, content=None, tools_id=N
 
     return json_data
 
-
-def _detect_image_format_by_magic(file_content: bytes):
-    if file_content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if file_content.startswith(b"\xff\xd8\xff"):
-        return "jpeg"
-    if file_content.startswith(b"RIFF") and file_content[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
 def get_image_format(file_content: bytes):
-    fallback_format = _detect_image_format_by_magic(file_content)
-    if Image is None:
-        return fallback_format
-
     try:
         img = Image.open(io.BytesIO(file_content))
         return img.format.lower()
     except Exception:
-        return fallback_format
-
+        return None
 
 def encode_image(file_content: bytes):
     img_format = get_image_format(file_content)
@@ -1051,12 +1023,6 @@ async def get_base64_image(image_url: str) -> tuple[str, str]:
 
     # 将 webp 转换为 png（某些 API 不支持 webp）
     if image_type == "image/webp":
-        if Image is None:
-            raise HTTPException(
-                status_code=400,
-                detail="当前环境未安装 Pillow，无法将 WEBP 转换为 PNG。请安装 pillow 或改用 PNG/JPEG 图片。",
-            )
-
         image_data = base64.b64decode(base64_image.split(",")[1])
         image = Image.open(io.BytesIO(image_data))
         png_buffer = io.BytesIO()
@@ -1119,36 +1085,32 @@ async def upload_image_to_0x0st(base64_image: str, max_size_mb: float = 10.0):
     
     # 如果图片太大，尝试压缩
     if image_size_mb > max_size_mb:
-        if Image is None:
-            logger.warning("[upload_image] Pillow not installed, skip compression for oversized image.")
-        else:
-            try:
-                logger.info(f"[upload_image] Image too large ({image_size_mb:.2f} MB), compressing...")
-                image_bytes = base64.b64decode(base64_data)
-                img = Image.open(io.BytesIO(image_bytes))
-
-                # 计算缩放比例
-                scale = (max_size_mb / image_size_mb) ** 0.5
-                new_width = int(img.width * scale)
-                new_height = int(img.height * scale)
-
-                # 缩放图片
-                resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-                img = img.resize((new_width, new_height), resample)
-
-                # 转换为 JPEG 格式以减小体积
-                output = io.BytesIO()
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    # 有透明通道的转为 RGB
-                    img = img.convert('RGB')
-                img.save(output, format='JPEG', quality=85, optimize=True)
-                base64_data = base64.b64encode(output.getvalue()).decode('utf-8')
-
-                new_size_mb = len(base64_data) * 3 // 4 / (1024 * 1024)
-                logger.info(f"[upload_image] Compressed to {new_size_mb:.2f} MB, new size: {new_width}x{new_height}")
-            except Exception as e:
-                logger.error(f"[upload_image] Compression failed: {e}")
-                # 压缩失败，继续尝试上传原图
+        try:
+            logger.info(f"[upload_image] Image too large ({image_size_mb:.2f} MB), compressing...")
+            image_bytes = base64.b64decode(base64_data)
+            img = Image.open(io.BytesIO(image_bytes))
+            
+            # 计算缩放比例
+            scale = (max_size_mb / image_size_mb) ** 0.5
+            new_width = int(img.width * scale)
+            new_height = int(img.height * scale)
+            
+            # 缩放图片
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # 转换为 JPEG 格式以减小体积
+            output = io.BytesIO()
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # 有透明通道的转为 RGB
+                img = img.convert('RGB')
+            img.save(output, format='JPEG', quality=85, optimize=True)
+            base64_data = base64.b64encode(output.getvalue()).decode('utf-8')
+            
+            new_size_mb = len(base64_data) * 3 // 4 / (1024 * 1024)
+            logger.info(f"[upload_image] Compressed to {new_size_mb:.2f} MB, new size: {new_width}x{new_height}")
+        except Exception as e:
+            logger.error(f"[upload_image] Compression failed: {e}")
+            # 压缩失败，继续尝试上传原图
 
     # freeimage.host 公共 guest API key
     FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"

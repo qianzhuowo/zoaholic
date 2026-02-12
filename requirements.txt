@@ -1,7 +1,0 @@
-fastapi
-starlette
-httpx
-python-multipart
-ruamel-yaml
-aiofiles
-certifi

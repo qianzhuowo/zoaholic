@@ -14,19 +14,9 @@ import asyncio
 import httpx
 from datetime import datetime
 
-from fastapi import HTTPException
-
-try:
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
-    _CRYPTOGRAPHY_AVAILABLE = True
-except Exception:  # pragma: no cover
-    hashes = None
-    padding = None
-    load_pem_private_key = None
-    _CRYPTOGRAPHY_AVAILABLE = False
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from ..utils import (
     safe_get,
@@ -136,14 +126,6 @@ gemini_max_token_65k_models = ["gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-f
 
 def create_jwt(client_email, private_key):
     """创建 JWT token 用于 Vertex AI 认证"""
-    if not _CRYPTOGRAPHY_AVAILABLE:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "当前环境缺少 cryptography 依赖，无法使用 Vertex Service Account 认证。"
-                "请安装 cryptography 或改用 API Key。"
-            ),
-        )
     # JWT Header
     header = json.dumps({
         "alg": "RS256",

@@ -16,8 +16,7 @@ from pydantic import BaseModel, Field
 from core.jwt_utils import issue_jwt, decode_jwt
 from core.security import verify_password
 from routes.deps import rate_limit_dependency, get_app
-from db import DISABLE_DATABASE, async_session, IS_D1_MODE
-from core.d1 import get_d1_database
+from db import DISABLE_DATABASE, async_session_scope, AdminUser, DB_TYPE
 
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -63,31 +62,32 @@ def _select_admin_api_key_from_config(conf: dict) -> Optional[str]:
 
 @router.post("/login", response_model=LoginResponse, dependencies=[Depends(rate_limit_dependency)])
 async def login(payload: LoginRequest = Body(...)):
-    if DISABLE_DATABASE or (not IS_D1_MODE and async_session is None):
+    if DISABLE_DATABASE:
         raise HTTPException(status_code=500, detail="Database is disabled; cannot login.")
 
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
-            raise HTTPException(status_code=500, detail="D1 binding not found; cannot login.")
-        admin_user = await db.first(
-            "SELECT id, username, password_hash, jwt_secret FROM admin_user WHERE id = 1"
-        )
-    else:
-        from db import AdminUser
+    async with async_session_scope() as db:
+        if (DB_TYPE or "sqlite").lower() == "d1":
+            row = await db.query_one(
+                "SELECT id, username, password_hash, jwt_secret FROM admin_user WHERE id = ?",
+                [1],
+            )
+            admin_user = (
+                AdminUser(
+                    id=int(row.get("id") or 1),
+                    username=str(row.get("username") or ""),
+                    password_hash=str(row.get("password_hash") or ""),
+                    jwt_secret=row.get("jwt_secret"),
+                ) if row else None
+            )
+        else:
+            admin_user = await db.get(AdminUser, 1)
 
-        async with async_session() as session:
-            admin_user = await session.get(AdminUser, 1)
     # 若没有显式配置 JWT_SECRET，则优先使用 DB 中持久化的 jwt_secret
     try:
         from core.jwt_utils import set_jwt_secret
 
         if not (os.getenv("JWT_SECRET") or "").strip():
-            if isinstance(admin_user, dict):
-                jwt_secret = admin_user.get("jwt_secret")
-                if jwt_secret:
-                    set_jwt_secret(str(jwt_secret))
-            elif admin_user is not None and getattr(admin_user, "jwt_secret", None):
+            if admin_user is not None and getattr(admin_user, "jwt_secret", None):
                 set_jwt_secret(str(admin_user.jwt_secret))
     except Exception:
         pass
@@ -95,20 +95,13 @@ async def login(payload: LoginRequest = Body(...)):
     if admin_user is None:
         raise HTTPException(status_code=404, detail="Admin user not initialized. Please visit /setup.")
 
-    if isinstance(admin_user, dict):
-        username = str(admin_user.get("username") or "")
-        password_hash = str(admin_user.get("password_hash") or "")
-    else:
-        username = admin_user.username
-        password_hash = admin_user.password_hash
-
-    if username != payload.username:
+    if admin_user.username != payload.username:
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
-    if not verify_password(payload.password, password_hash):
+    if not verify_password(payload.password, admin_user.password_hash):
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
-    token = issue_jwt({"sub": username, "role": "admin"})
+    token = issue_jwt({"sub": admin_user.username, "role": "admin"})
 
     # admin_api_key 仅用于前端展示/兼容旧鉴权；配置权威来自 api.yaml（app.state.config）
     app = get_app()

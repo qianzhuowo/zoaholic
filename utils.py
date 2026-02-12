@@ -7,21 +7,13 @@ import time as time_module
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from collections import defaultdict
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional
 from ruamel.yaml import YAML, YAMLError
 from datetime import datetime, timedelta, timezone
 
-from db import async_session, ChannelStat, AppConfig, DISABLE_DATABASE, IS_D1_MODE, DB_TYPE
+from sqlalchemy import select, func, case
+from db import async_session_scope, ChannelStat, AppConfig, DISABLE_DATABASE, DB_TYPE, d1_client
 from core.env import env_bool
-from core.d1 import get_d1_database, d1_datetime
-
-if not IS_D1_MODE:
-    from sqlalchemy import select, func, case
-else:
-    # D1 模式不依赖 SQLAlchemy 查询
-    select = None
-    func = None
-    case = None
 
 from core.log_config import logger
 from core.utils import (
@@ -118,35 +110,7 @@ async def save_config_to_db(config_data: dict) -> None:
     另外会同步存一份 YAML（config_yaml）便于人工排查（可选）。
     """
 
-    # D1 模式下配置可在无 SQLAlchemy 的情况下写入 app_config
-    if DISABLE_DATABASE and not IS_D1_MODE:
-        return
-
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
-            return
-
-        config_obj = dump_config_to_json_obj(config_data)
-        config_yaml = dump_config_to_yaml_text(config_data)
-        config_json_value = json.dumps(config_obj, ensure_ascii=False)
-
-        existing = await db.first("SELECT id FROM app_config WHERE id = 1")
-        if existing:
-            await db.run(
-                "UPDATE app_config SET config_json = ?, config_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-                config_json_value,
-                config_yaml,
-            )
-        else:
-            await db.run(
-                "INSERT INTO app_config (id, config_json, config_yaml, updated_at) VALUES (1, ?, ?, CURRENT_TIMESTAMP)",
-                config_json_value,
-                config_yaml,
-            )
-        return
-
-    if async_session is None:
+    if DISABLE_DATABASE:
         return
 
     config_obj = dump_config_to_json_obj(config_data)
@@ -163,7 +127,29 @@ async def save_config_to_db(config_data: dict) -> None:
     except Exception:
         pass
 
-    async with async_session() as session:
+    if (DB_TYPE or "sqlite").lower() == "d1":
+        if d1_client is None:
+            return
+        import json as _json
+
+        config_json_text = config_json_value
+        if not isinstance(config_json_text, str):
+            config_json_text = _json.dumps(config_json_text, ensure_ascii=False)
+
+        existing = await d1_client.query_one("SELECT id FROM app_config WHERE id = ?", [1])
+        if existing is None:
+            await d1_client.execute(
+                "INSERT INTO app_config (id, config_json, config_yaml, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                [1, config_json_text, config_yaml],
+            )
+        else:
+            await d1_client.execute(
+                "UPDATE app_config SET config_json = ?, config_yaml = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [config_json_text, config_yaml, 1],
+            )
+        return
+
+    async with async_session_scope() as session:
         existing = await session.get(AppConfig, 1)
         if existing is None:
             existing = AppConfig(id=1, config_json=config_json_value, config_yaml=config_yaml)
@@ -180,46 +166,41 @@ async def load_config_from_db() -> Optional[dict]:
     优先读取 config_json；若不存在则兼容旧的 config_yaml。
     """
 
-    # D1 模式下配置可在无 SQLAlchemy 的情况下读取 app_config
-    if DISABLE_DATABASE and not IS_D1_MODE:
+    if DISABLE_DATABASE:
         return None
 
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
+    if (DB_TYPE or "sqlite").lower() == "d1":
+        if d1_client is None:
             return None
 
-        row = await db.first("SELECT config_json, config_yaml FROM app_config WHERE id = 1")
-        if not row:
+        row = await d1_client.query_one("SELECT config_json, config_yaml FROM app_config WHERE id = ?", [1])
+        if row is None:
             return None
 
-        # 1) 优先 JSON
         data = row.get("config_json")
         if isinstance(data, dict):
             return data
         if isinstance(data, str) and data.strip():
+            import json as _json
             try:
-                parsed = json.loads(data)
+                parsed = _json.loads(data)
                 if isinstance(parsed, dict):
                     return parsed
             except Exception:
                 pass
 
-        # 2) 兼容旧 YAML
         yaml_text = row.get("config_yaml")
         if isinstance(yaml_text, str) and yaml_text.strip():
             try:
-                parsed_yaml = yaml.load(yaml_text)
-                if isinstance(parsed_yaml, dict):
-                    return parsed_yaml
+                data = yaml.load(yaml_text)
+                if isinstance(data, dict):
+                    return data
             except Exception as e:
                 logger.error(f"Failed to parse config_yaml from D1: {e}")
+
         return None
 
-    if async_session is None:
-        return None
-
-    async with async_session() as session:
+    async with async_session_scope() as session:
         row = await session.get(AppConfig, 1)
         if row is None:
             return None
@@ -1127,6 +1108,46 @@ def get_all_models(config, allowed_groups=None):
     all_models.sort(key=lambda x: x["id"])
     return all_models
 
+
+async def _query_channel_key_stats_d1(
+    provider_name: str,
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
+) -> List[Dict]:
+    if d1_client is None:
+        return []
+
+    if not start_dt:
+        start_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    sql = (
+        "SELECT provider_api_key, COUNT(*) AS total_requests, "
+        "SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS success_count "
+        "FROM channel_stats "
+        "WHERE provider = ? AND timestamp >= ? AND provider_api_key IS NOT NULL"
+    )
+    params = [provider_name, start_dt]
+    if end_dt:
+        sql += " AND timestamp < ?"
+        params.append(end_dt)
+    sql += " GROUP BY provider_api_key"
+
+    rows = await d1_client.query_all(sql, params)
+
+    key_stats: List[Dict] = []
+    for row in rows:
+        total_requests = int(row.get("total_requests") or 0)
+        success_count = int(row.get("success_count") or 0)
+        key_stats.append(
+            {
+                "api_key": row.get("provider_api_key"),
+                "success_count": success_count,
+                "total_requests": total_requests,
+                "success_rate": (success_count / total_requests) if total_requests > 0 else 0,
+            }
+        )
+    return key_stats
+
 async def query_channel_key_stats(
     provider_name: str,
     start_dt: Optional[datetime] = None,
@@ -1136,72 +1157,51 @@ async def query_channel_key_stats(
     if DISABLE_DATABASE:
         return []
 
-    if not start_dt:
-        start_dt = datetime.now(timezone.utc) - timedelta(hours=24)
-
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
-            return []
-
-        sql = (
-            "SELECT provider_api_key, COUNT(*) AS total_requests, "
-            "COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success_count "
-            "FROM channel_stats WHERE provider = ? AND timestamp >= ? AND provider_api_key IS NOT NULL"
+    if (DB_TYPE or "sqlite").lower() == "d1":
+        key_stats = await _query_channel_key_stats_d1(provider_name, start_dt=start_dt, end_dt=end_dt)
+        sorted_stats = sorted(
+            key_stats,
+            key=lambda item: (item["success_rate"], item["total_requests"]),
+            reverse=True,
         )
-        params: list[Any] = [provider_name, d1_datetime(start_dt)]
-        if end_dt:
-            sql += " AND timestamp < ?"
-            params.append(d1_datetime(end_dt))
+        return sorted_stats
 
-        sql += " GROUP BY provider_api_key"
-        stats_from_db = await db.all(sql, *params)
-    else:
-        async with async_session() as session:
-            query = (
-                select(
-                    ChannelStat.provider_api_key,
-                    func.count().label("total_requests"),
-                    func.sum(case((ChannelStat.success, 1), else_=0)).label(
-                        "success_count"
-                    ),
-                )
-                .where(ChannelStat.provider == provider_name)
-                .where(ChannelStat.timestamp >= start_dt)
-                .where(ChannelStat.provider_api_key.isnot(None))
+    async with async_session_scope() as session:
+        if not start_dt:
+            start_dt = datetime.now(timezone.utc) - timedelta(hours=24)
+        query = (
+            select(
+                ChannelStat.provider_api_key,
+                func.count().label("total_requests"),
+                func.sum(case((ChannelStat.success, 1), else_=0)).label("success_count"),
             )
-
-            if end_dt:
-                query = query.where(ChannelStat.timestamp < end_dt)
-
-            query = query.group_by(ChannelStat.provider_api_key)
-
-            result = await session.execute(query)
-            stats_from_db = result.mappings().all()
-
+            .where(ChannelStat.provider == provider_name)
+            .where(ChannelStat.timestamp >= start_dt)
+            .where(ChannelStat.provider_api_key.isnot(None))
+        )
+        if end_dt:
+            query = query.where(ChannelStat.timestamp < end_dt)
+        query = query.group_by(ChannelStat.provider_api_key)
+        result = await session.execute(query)
+        stats_from_db = result.mappings().all()
     key_stats = []
     for row in stats_from_db:
-        api_key_value = row.get("provider_api_key") if isinstance(row, dict) else row.provider_api_key
-        success_count = int((row.get("success_count") if isinstance(row, dict) else row.success_count) or 0)
-        total_requests = int((row.get("total_requests") if isinstance(row, dict) else row.total_requests) or 0)
         key_stats.append(
             {
-                "api_key": api_key_value,
-                "success_count": success_count,
-                "total_requests": total_requests,
-                "success_rate": success_count / total_requests
-                if total_requests > 0
+                "api_key": row.provider_api_key,
+                "success_count": row.success_count,
+                "total_requests": row.total_requests,
+                "success_rate": row.success_count / row.total_requests
+                if row.total_requests > 0
                 else 0,
             }
         )
-
     # Sort the results by success rate and total requests
     sorted_stats = sorted(
         key_stats,
         key=lambda item: (item["success_rate"], item["total_requests"]),
         reverse=True,
     )
-
     return sorted_stats
 
 

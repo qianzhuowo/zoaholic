@@ -1,6 +1,5 @@
 import os
 import json
-import uuid
 import asyncio
 import tomllib
 from collections import defaultdict
@@ -31,7 +30,7 @@ from core.error_response import openai_error_response
 
 from utils import safe_get, load_config
 
-from db import DISABLE_DATABASE, async_session, RequestStat, AdminUser, IS_D1_MODE
+from db import DISABLE_DATABASE, RequestStat, AdminUser, DB_TYPE, async_session_scope
 from core.stats import (
     create_tables,
     update_paid_api_keys_states,
@@ -40,7 +39,6 @@ from core.stats import (
 from core.plugins import get_plugin_manager
 
 DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 600))
-APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 # DEBUG 环境变量支持 true/false/1/0/yes/no
 is_debug = env_bool("DEBUG", False)
 logger.info("DISABLE_DATABASE: %s", DISABLE_DATABASE)
@@ -87,6 +85,8 @@ async def cleanup_expired_raw_data():
     清理已过期的数据字段（保留日志记录本身）
 
     """
+    from sqlalchemy import update
+    
     first_run = True
     while True:
         try:
@@ -94,40 +94,27 @@ async def cleanup_expired_raw_data():
             if not first_run:
                 await asyncio.sleep(3600)
             first_run = False
-
+            
             if DISABLE_DATABASE:
                 continue
+                
+            async with async_session_scope() as db:
+                now = datetime.now(timezone.utc)
 
-            if IS_D1_MODE:
-                try:
-                    from core.d1 import get_d1_database, d1_datetime
-
-                    db = await get_d1_database(required=False)
-                    if db is None:
-                        continue
-
-                    now_str = d1_datetime(datetime.now(timezone.utc))
-                    await db.run(
+                if (DB_TYPE or "sqlite").lower() == "d1":
+                    result = await db.execute(
                         "UPDATE request_stats "
                         "SET request_headers = NULL, request_body = NULL, response_body = NULL "
                         "WHERE raw_data_expires_at IS NOT NULL "
                         "AND raw_data_expires_at < ? "
                         "AND (request_headers IS NOT NULL OR request_body IS NOT NULL OR response_body IS NOT NULL)",
-                        now_str,
+                        [now],
                     )
-                except Exception as e:
-                    logger.error(f"Error in raw data cleanup task (d1): {e}")
-                    await asyncio.sleep(60)
-                continue
+                    rowcount = int((result.get("meta") or {}).get("changes") or 0)
+                    if rowcount > 0:
+                        logger.info(f"Cleaned up expired raw data from {rowcount} log entries")
+                    continue
 
-            from sqlalchemy import update
-            
-            if async_session is None:
-                continue
-                
-            async with async_session() as session:
-                now = datetime.now(timezone.utc)
-                
                 # 清理过期的原始数据字段
                 # 只清理有过期时间且已过期的记录
                 stmt = (
@@ -145,8 +132,8 @@ async def cleanup_expired_raw_data():
                         response_body=None
                     )
                 )
-                result = await session.execute(stmt)
-                await session.commit()
+                result = await db.execute(stmt)
+                await db.commit()
                 
                 if result.rowcount > 0:
                     logger.info(f"Cleaned up expired raw data from {result.rowcount} log entries")
@@ -178,30 +165,21 @@ async def lifespan(app: FastAPI):
             from core.jwt_utils import set_jwt_secret
 
             if not (os.getenv("JWT_SECRET") or "").strip():
-                if IS_D1_MODE:
-                    from core.d1 import get_d1_database
+                async with async_session_scope() as db:
+                    if (DB_TYPE or "sqlite").lower() == "d1":
+                        row = await db.query_one("SELECT jwt_secret FROM admin_user WHERE id = ?", [1])
+                        jwt_secret = row.get("jwt_secret") if row else None
+                    else:
+                        admin_user = await db.get(AdminUser, 1)
+                        jwt_secret = getattr(admin_user, "jwt_secret", None) if admin_user is not None else None
 
-                    db = await get_d1_database(required=False)
-                    admin_user = None
-                    if db is not None:
-                        admin_user = await db.first("SELECT jwt_secret FROM admin_user WHERE id = 1")
-
-                    jwt_secret = (admin_user or {}).get("jwt_secret") if isinstance(admin_user, dict) else None
-                    if jwt_secret:
-                        set_jwt_secret(str(jwt_secret))
-                elif async_session is not None:
-                    async with async_session() as session:
-                        admin_user = await session.get(AdminUser, 1)
-                    if admin_user is not None and getattr(admin_user, "jwt_secret", None):
-                        set_jwt_secret(str(admin_user.jwt_secret))
+                if jwt_secret:
+                    set_jwt_secret(str(jwt_secret))
         except Exception as e:
             logger.debug("JWT secret init skipped/failed: %s", e)
 
-        if not IS_D1_MODE:
-            cleanup_task = asyncio.create_task(cleanup_expired_raw_data())
-            logger.info("Started raw data cleanup background task")
-        else:
-            logger.info("Skip raw data cleanup background task in D1 mode")
+        cleanup_task = asyncio.create_task(cleanup_expired_raw_data())
+        logger.info("Started raw data cleanup background task")
 
     if app and not hasattr(app.state, 'config'):
         # logger.warning("Config not found, attempting to reload")
@@ -436,7 +414,7 @@ ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}  
 
 @app.get("/{path:path}")
 async def spa_fallback(path: str):
-    index_html = os.path.join(APP_ROOT, "static", "index.html")
+    index_html = "./static/index.html"
 
     # 检查是否是前端 SPA 路由
     if path == "" or any(path.startswith(route.lstrip("/")) for route in SPA_ROUTES):
@@ -451,7 +429,7 @@ async def spa_fallback(path: str):
         )
 
     # 尝试返回静态文件
-    static_file = os.path.join(APP_ROOT, "static", path)
+    static_file = f"./static/{path}"
     if os.path.isfile(static_file):
         # 带 hash 的静态资源可以长期缓存
         if "/assets/" in path or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf")):
@@ -472,13 +450,10 @@ async def spa_fallback(path: str):
 # 添加静态文件挂载（用于 assets、icons 等静态资源）
 # 注意：当仅提交源代码且未构建前端时，static 目录可能只有 .gitkeep。
 # 因此这里只在目录存在时才挂载，避免启动时报错。
-STATIC_DIR = os.path.join(APP_ROOT, "static")
-ASSETS_DIR = os.path.join(STATIC_DIR, "assets")
-ICONS_DIR = os.path.join(STATIC_DIR, "icons")
-if os.path.isdir(ASSETS_DIR):
-    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
-if os.path.isdir(ICONS_DIR):
-    app.mount("/icons", StaticFiles(directory=ICONS_DIR), name="icons")
+if os.path.isdir("./static/assets"):
+    app.mount("/assets", StaticFiles(directory="./static/assets"), name="assets")
+if os.path.isdir("./static/icons"):
+    app.mount("/icons", StaticFiles(directory="./static/icons"), name="icons")
 
 if __name__ == '__main__':
     import uvicorn

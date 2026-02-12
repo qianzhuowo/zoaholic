@@ -21,24 +21,32 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install pex
+        run: pip install pex
+
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.0"
 
-      - name: Install pex
-        run: pip install pex
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-      - name: Export requirements for PEX
-        run: uv export --frozen --format requirements-txt --no-hashes -o requirements.txt
+      - name: Install dependencies with uv
+        run: uv pip install -r pyproject.toml
         env:
           UV_SYSTEM_PYTHON: 1
 
@@ -48,28 +56,24 @@ jobs:
           VERSION=$(grep "^version = " pyproject.toml | awk -F'"' '{print $2}')
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Set artifact name
-        run: |
-          echo "ARTIFACT=zoaholic-${{ matrix.platform }}-${{ matrix.arch }}-${VERSION}.pex" >> $GITHUB_ENV
-
       - name: Build Linux PEX
         if: matrix.platform == 'linux'
         run: |
-          pex -D . -r requirements.txt \
+          pex -D . -r pyproject.toml \
           -c uvicorn \
           --inject-args 'main:app --host 0.0.0.0 --port 8000' \
-          --platform linux_x86_64-cp-3.11-cp311 \
-          --interpreter-constraint '==3.11.*' \
+          --platform linux_x86_64-cp-3.10-cp310 \
+          --interpreter-constraint '==3.10.*' \
           --no-strip-pex-env \
-          -o $ARTIFACT
+          -o zoaholic-linux-x86_64-${VERSION}.pex
 
       - name: Build MacOS PEX
         if: matrix.platform == 'macos'
         run: |
-          pex -D . -r requirements.txt \
+          pex -r pyproject.toml \
           -c uvicorn \
           --inject-args 'main:app --host 0.0.0.0 --port 8000' \
-          -o $ARTIFACT
+          -o zoaholic-macos-arm64-${VERSION}.pex
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -80,4 +84,4 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            ${{ env.ARTIFACT }}
+            zoaholic-${{ matrix.platform }}-${{ matrix.arch }}-${{ env.VERSION }}.pex

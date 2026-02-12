@@ -17,8 +17,7 @@ from core.log_config import logger
 from core.security import hash_password, verify_password
 from routes.deps import get_app
 from utils import update_config, load_config_from_db
-from db import DISABLE_DATABASE, async_session, IS_D1_MODE
-from core.d1 import get_d1_database
+from db import DISABLE_DATABASE, async_session_scope
 
 
 router = APIRouter(prefix="/setup", tags=["Setup"])
@@ -68,71 +67,68 @@ async def _ensure_admin_user_table():
 
 async def _get_admin_user():
     # 延迟导入，避免循环引用
+    from db import AdminUser
+
     if DISABLE_DATABASE:
         return None
 
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
-            return None
-        return await db.first(
-            "SELECT id, username, password_hash, jwt_secret FROM admin_user WHERE id = 1"
-        )
+    from db import DB_TYPE
 
-    from db import AdminUser
-    if async_session is None:
-        return None
-    async with async_session() as session:
-        return await session.get(AdminUser, 1)
+    async with async_session_scope() as db:
+        if (DB_TYPE or "sqlite").lower() == "d1":
+            row = await db.query_one(
+                "SELECT id, username, password_hash, jwt_secret FROM admin_user WHERE id = ?",
+                [1],
+            )
+            if not row:
+                return None
+            return AdminUser(
+                id=int(row.get("id") or 1),
+                username=str(row.get("username") or ""),
+                password_hash=str(row.get("password_hash") or ""),
+                jwt_secret=row.get("jwt_secret"),
+            )
+        return await db.get(AdminUser, 1)
 
 
 async def _upsert_admin_user(username: str, password: str, jwt_secret: str) -> None:
+    from db import AdminUser
+
     if DISABLE_DATABASE:
         raise HTTPException(status_code=500, detail="Database is disabled; cannot persist admin user.")
+
+    from db import DB_TYPE
 
     pwd_hash = hash_password(password)
     jwt_secret = (jwt_secret or "").strip()
 
-    if IS_D1_MODE:
-        db = await get_d1_database(required=False)
-        if db is None:
-            raise HTTPException(status_code=500, detail="D1 binding not found; cannot persist admin user.")
-
-        existing = await db.first("SELECT id, jwt_secret FROM admin_user WHERE id = 1")
-        if existing is None:
-            await db.run(
-                "INSERT INTO admin_user (id, username, password_hash, jwt_secret) VALUES (1, ?, ?, ?)",
-                username,
-                pwd_hash,
-                jwt_secret,
-            )
+    async with async_session_scope() as db:
+        if (DB_TYPE or "sqlite").lower() == "d1":
+            existing = await db.query_one("SELECT id, jwt_secret FROM admin_user WHERE id = ?", [1])
+            if existing is None:
+                await db.execute(
+                    "INSERT INTO admin_user (id, username, password_hash, jwt_secret) VALUES (?, ?, ?, ?)",
+                    [1, username, pwd_hash, jwt_secret],
+                )
+            else:
+                existing_secret = existing.get("jwt_secret")
+                next_secret = existing_secret if existing_secret else jwt_secret
+                await db.execute(
+                    "UPDATE admin_user SET username = ?, password_hash = ?, jwt_secret = ? WHERE id = ?",
+                    [username, pwd_hash, next_secret, 1],
+                )
         else:
-            existing_jwt = existing.get("jwt_secret") if isinstance(existing, dict) else None
-            final_jwt_secret = existing_jwt or jwt_secret
-            await db.run(
-                "UPDATE admin_user SET username = ?, password_hash = ?, jwt_secret = ? WHERE id = 1",
-                username,
-                pwd_hash,
-                final_jwt_secret,
-            )
-        return
-
-    from db import AdminUser
-    if async_session is None:
-        raise HTTPException(status_code=500, detail="Database session unavailable.")
-
-    async with async_session() as session:
-        existing = await session.get(AdminUser, 1)
-        if existing is None:
-            existing = AdminUser(id=1, username=username, password_hash=pwd_hash, jwt_secret=jwt_secret)
-            session.add(existing)
-        else:
-            existing.username = username
-            existing.password_hash = pwd_hash
-            # 若之前没有 jwt_secret，则补上
-            if not getattr(existing, "jwt_secret", None):
-                existing.jwt_secret = jwt_secret
-        await session.commit()
+            existing = await db.get(AdminUser, 1)
+            if existing is None:
+                existing = AdminUser(id=1, username=username, password_hash=pwd_hash, jwt_secret=jwt_secret)
+                db.add(existing)
+            else:
+                existing.username = username
+                existing.password_hash = pwd_hash
+                # 若之前没有 jwt_secret，则补上
+                if not getattr(existing, "jwt_secret", None):
+                    existing.jwt_secret = jwt_secret
+            await db.commit()
 
 
 def _generate_admin_api_key() -> str:
@@ -186,10 +182,10 @@ async def setup_init(payload: SetupInitRequest = Body(...)):
     - 后续建议通过 /auth/login 使用“账号密码 + JWT”登录管理控制台。
     """
 
-    if DISABLE_DATABASE or (not IS_D1_MODE and async_session is None):
+    if DISABLE_DATABASE:
         raise HTTPException(
             status_code=500,
-            detail="Database is disabled; cannot run setup wizard. Please set DISABLE_DATABASE=false and configure database binding.",
+            detail="Database is disabled; cannot run setup wizard. Please set DISABLE_DATABASE=false and provide DATABASE_URL.",
         )
 
     if payload.password != payload.confirm_password:
@@ -312,17 +308,10 @@ async def setup_login(payload: SetupLoginRequest = Body(...)):
     if admin_user is None:
         raise HTTPException(status_code=404, detail="Admin user not initialized")
 
-    if isinstance(admin_user, dict):
-        username = str(admin_user.get("username") or "")
-        password_hash = str(admin_user.get("password_hash") or "")
-    else:
-        username = admin_user.username
-        password_hash = admin_user.password_hash
-
-    if username != payload.username:
+    if admin_user.username != payload.username:
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
-    if not verify_password(payload.password, password_hash):
+    if not verify_password(payload.password, admin_user.password_hash):
         raise HTTPException(status_code=403, detail="Invalid username or password")
 
     # 从当前配置中取管理员 key（配置权威来自 api.yaml/app.state.config）

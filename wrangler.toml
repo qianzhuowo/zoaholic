@@ -1,35 +1,4 @@
-name = "zoaholic"
-main = "worker.py"
+name = "Zoaholic"
+main = "main.py"
 compatibility_flags = ["python_workers"]
-compatibility_date = "2024-09-23"
-
-[assets]
-directory = "./static"
-binding = "ASSETS"
-
-[vars]
-# Cloudflare Workers + D1 运行配置
-DB_TYPE = "d1"
-DISABLE_DATABASE = "false"
-
-# 配置策略建议（Workers 通常无持久化文件系统）：
-# - db：以 D1 中 app_config 为权威
-# - auto：首次可用 CONFIG_YAML(_BASE64) 作为种子写入 D1
-CONFIG_STORAGE = "db"
-
-# D1 绑定名（与 [[d1_databases]].binding 保持一致）
-D1_BINDING = "DB"
-
-[[d1_databases]]
-# 你在 Cloudflare 控制台创建 of D1 binding 名称
-binding = "DB"
-# Wrangler 环境中 D1 数据库名（示例）
-database_name = "zoaholic"
-# 替换为真实 database_id
-database_id = "601d6cb7-13be-41a3-bd2c-cfd9884b3089"
-
-[observability]
-enabled = true
-
-[placement]
-mode = "smart"
+compatibility_date = "2024-03-31"
