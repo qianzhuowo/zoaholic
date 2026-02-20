@@ -50,9 +50,15 @@ Zoaholic 不再强迫所有请求转换为 OpenAI 格式。网关内置了智能
 
 ## 快速开始（推荐：Docker + 初始化向导）
 
-### 1）准备数据库（线上强烈推荐 PostgreSQL / Cloudflare D1）
+### 1）准备数据库（线上强烈推荐 PostgreSQL / TiDB(MySQL) / Cloudflare D1）
 
 Render / Aiven / Railway 等平台通常会提供 `DATABASE_URL`。
+
+目前已支持：
+
+- PostgreSQL：`postgres://...` 或 `postgresql://...`
+- TiDB / MySQL：`mysql://...`（会自动切换到 SQLAlchemy async driver：`mysql+asyncmy://...`）
+- Cloudflare D1：`DB_TYPE=d1` + D1 相关环境变量
 
 如果你在 Cloudflare Workers 部署，也可以直接使用 D1：
 
@@ -103,7 +109,7 @@ docker run --rm -p 8000:8000 \
 
 | 变量 | 示例 | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://...` 或 `postgres://...` | PostgreSQL 连接串（与 D1 二选一）。统计/日志 + 配置入库都依赖数据库。 |
+| `DATABASE_URL` | `postgresql://...` / `postgres://...` / `mysql://...` | 数据库连接串（与 D1 二选一）。统计/日志 + 配置入库都依赖数据库。 |
 
 ### 建议配置
 

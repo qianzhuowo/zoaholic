@@ -61,9 +61,15 @@ Inherited from uni-api routing core (`core/routing.py`):
 
 ## Quick Start (Recommended: Docker + Setup Wizard)
 
-### 1) Prepare a database (PostgreSQL / Cloudflare D1 recommended for cloud)
+### 1) Prepare a database (PostgreSQL / TiDB(MySQL) / Cloudflare D1 recommended for cloud)
 
 Platforms like Render/Aiven/Railway usually provide a `DATABASE_URL`.
+
+Currently supported:
+
+- PostgreSQL: `postgres://...` or `postgresql://...`
+- TiDB / MySQL: `mysql://...` (will be normalized to SQLAlchemy async driver: `mysql+asyncmy://...`)
+- Cloudflare D1: `DB_TYPE=d1` + D1 env vars
 
 If you deploy on Cloudflare Workers, you can also use D1 directly:
 
@@ -118,7 +124,7 @@ Below are the most common and most error-prone environment variables for cloud d
 
 | Variable | Example | Notes |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://...` or `postgres://...` | PostgreSQL connection URL (choose one of PostgreSQL or D1). Stats/logs + config persistence depend on DB. |
+| `DATABASE_URL` | `postgresql://...` / `postgres://...` / `mysql://...` | Database connection URL (choose one of DB or D1). Stats/logs + config persistence depend on DB. |
 
 Render usually injects `PORT` automatically; Zoaholic will read `PORT` as the listening port.
 
