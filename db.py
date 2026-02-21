@@ -329,18 +329,23 @@ _IS_MYSQL = (DB_TYPE or "sqlite").lower() == "mysql"
 # - MySQL/TiDB：CURRENT_TIMESTAMP（避免 DEFAULT now() 导致建表失败）
 _SERVER_NOW = text("CURRENT_TIMESTAMP") if _IS_MYSQL else func.now()
 
+# MySQL/TiDB 方言要求 VARCHAR 必须指定长度；同时为避免旧 MySQL/utf8mb4 下索引长度限制，
+# 对带索引的列使用更保守的 191。
+_VARCHAR = String(255) if _IS_MYSQL else String
+_VARCHAR_INDEX = String(191) if _IS_MYSQL else String
+
 class RequestStat(Base):
     __tablename__ = 'request_stats'
     id = Column(Integer, primary_key=True)
-    request_id = Column(String)
-    endpoint = Column(String)
-    client_ip = Column(String)
+    request_id = Column(_VARCHAR)
+    endpoint = Column(_VARCHAR)
+    client_ip = Column(_VARCHAR)
     process_time = Column(Float)
     first_response_time = Column(Float)
     content_start_time = Column(Float, nullable=True)  # 正文开始时间（首个非空content）
-    provider = Column(String, index=True)
-    model = Column(String, index=True)
-    api_key = Column(String, index=True)
+    provider = Column(_VARCHAR_INDEX, index=True)
+    model = Column(_VARCHAR_INDEX, index=True)
+    api_key = Column(_VARCHAR_INDEX, index=True)
     success = Column(Boolean, default=False, index=True)  # 请求是否成功
     status_code = Column(Integer, nullable=True, index=True)  # HTTP 状态码
     is_flagged = Column(Boolean, default=False)
@@ -353,10 +358,10 @@ class RequestStat(Base):
     timestamp = Column(DateTime(timezone=True), server_default=_SERVER_NOW, index=True)
     
     # 扩展日志字段
-    provider_id = Column(String, nullable=True, index=True)  # 渠道ID
+    provider_id = Column(_VARCHAR_INDEX, nullable=True, index=True)  # 渠道ID
     provider_key_index = Column(Integer, nullable=True)  # 渠道使用的上游key索引
-    api_key_name = Column(String, nullable=True)  # 使用的key
-    api_key_group = Column(String, nullable=True)  # 分组
+    api_key_name = Column(_VARCHAR, nullable=True)  # 使用的key
+    api_key_group = Column(_VARCHAR, nullable=True)  # 分组
     retry_count = Column(Integer, default=0)  # 重试次数
     retry_path = Column(Text, nullable=True)  # 重试路径JSON格式
     request_headers = Column(Text, nullable=True)  # 用户请求头JSON格式
@@ -370,11 +375,11 @@ class RequestStat(Base):
 class ChannelStat(Base):
     __tablename__ = 'channel_stats'
     id = Column(Integer, primary_key=True)
-    request_id = Column(String)
-    provider = Column(String, index=True)
-    model = Column(String, index=True)
-    api_key = Column(String)
-    provider_api_key = Column(String, nullable=True, index=True)
+    request_id = Column(_VARCHAR)
+    provider = Column(_VARCHAR_INDEX, index=True)
+    model = Column(_VARCHAR_INDEX, index=True)
+    api_key = Column(_VARCHAR)
+    provider_api_key = Column(_VARCHAR_INDEX, nullable=True, index=True)
     success = Column(Boolean, default=False)
     timestamp = Column(DateTime(timezone=True), server_default=_SERVER_NOW, index=True)
 
@@ -391,9 +396,9 @@ class AdminUser(Base):
     __tablename__ = "admin_user"
 
     id = Column(Integer, primary_key=True)
-    username = Column(String, nullable=False, index=True)
-    password_hash = Column(String, nullable=False)
-    jwt_secret = Column(String, nullable=True)
+    username = Column(_VARCHAR_INDEX, nullable=False, index=True)
+    password_hash = Column(_VARCHAR, nullable=False)
+    jwt_secret = Column(_VARCHAR, nullable=True)
 
 
 class AppConfig(Base):

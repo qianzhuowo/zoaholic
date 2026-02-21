@@ -250,11 +250,12 @@ async def create_tables():
     async with db_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        # 检查并添加缺失的列 - 扩展此简易迁移以支持 SQLite 和 PostgreSQL
+        # 检查并添加缺失的列 - 扩展此简易迁移以支持 SQLite / PostgreSQL / TiDB(MySQL)
         db_type = (DB_TYPE or "sqlite").lower()
-        if db_type in ["sqlite", "postgres", "d1"]:
+        if db_type in ["sqlite", "postgres", "mysql", "d1"]:
             def check_and_add_columns(connection):
                 inspector = inspect(connection)
+                preparer = connection.dialect.identifier_preparer
                 for table in [RequestStat, ChannelStat, AppConfig, AdminUser]:
                     table_name = table.__tablename__
                     existing_columns = {col['name'] for col in inspector.get_columns(table_name)}
@@ -270,9 +271,11 @@ async def create_tables():
                             default = _get_default_sql(column.default) if db_type == "sqlite" else ""
 
                             # 使用标准的 ALTER TABLE 语法
+                            qt = preparer.quote(table_name)
+                            qc = preparer.quote(column_name)
                             connection.execute(
                                 text(
-                                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {col_type}{default}'
+                                    f'ALTER TABLE {qt} ADD COLUMN {qc} {col_type}{default}'
                                 )
                             )
                             logger.info(
