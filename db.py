@@ -3,7 +3,7 @@ import ssl as ssl_module
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Optional
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 
 from core.env import env_bool
 from core.d1_client import D1HTTPClient
@@ -212,7 +212,16 @@ def _extract_mysql_ssl_connect_args(db_url: str) -> tuple[str, dict]:
     # 这样可以避免在 Render 等平台上因为“insecure transport prohibited”导致启动失败。
     if "ssl" not in connect_args:
         hostname = (parts.hostname or "").lower()
-        if hostname.endswith("tidbcloud.com") or hostname.endswith("tidbcloud.com.") or "tidbcloud.com" in hostname:
+        port = parts.port
+
+        # 经验规则：
+        # - TiDB Cloud 通常域名包含 tidbcloud.com
+        # - TiDB 默认端口常见为 4000
+        # 只要命中其一，就默认开启 TLS（VERIFY_IDENTITY 语义）
+        if (
+            (hostname.endswith("tidbcloud.com") or hostname.endswith("tidbcloud.com.") or "tidbcloud.com" in hostname)
+            or port == 4000
+        ):
             ctx = ssl_module.create_default_context(cafile=ssl_ca) if ssl_ca else ssl_module.create_default_context()
             ctx.check_hostname = True
             ctx.verify_mode = ssl_module.CERT_REQUIRED
@@ -309,6 +318,17 @@ from core.log_config import logger
 # 定义数据库模型
 Base = declarative_base()
 
+
+# ============== Dialect compatibility helpers ==============
+
+# MySQL/TiDB 在列 DEFAULT 上对表达式支持更严格，且 TiDB Cloud Serverless 强制 TLS。
+_IS_MYSQL = (DB_TYPE or "sqlite").lower() == "mysql"
+
+# 用于 DDL 的“当前时间”默认值：
+# - Postgres/SQLite：func.now()
+# - MySQL/TiDB：CURRENT_TIMESTAMP（避免 DEFAULT now() 导致建表失败）
+_SERVER_NOW = text("CURRENT_TIMESTAMP") if _IS_MYSQL else func.now()
+
 class RequestStat(Base):
     __tablename__ = 'request_stats'
     id = Column(Integer, primary_key=True)
@@ -330,7 +350,7 @@ class RequestStat(Base):
     total_tokens = Column(Integer, default=0)
     prompt_price = Column(Float, default=0.0)
     completion_price = Column(Float, default=0.0)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), server_default=_SERVER_NOW, index=True)
     
     # 扩展日志字段
     provider_id = Column(String, nullable=True, index=True)  # 渠道ID
@@ -356,7 +376,7 @@ class ChannelStat(Base):
     api_key = Column(String)
     provider_api_key = Column(String, nullable=True, index=True)
     success = Column(Boolean, default=False)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), server_default=_SERVER_NOW, index=True)
 
 
 class AdminUser(Base):
@@ -403,7 +423,14 @@ class AppConfig(Base):
     config_yaml = Column(Text, nullable=True)
 
     # 最近更新时间（数据库侧 now）
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), index=True)
+    # MySQL/TiDB: 使用 CURRENT_TIMESTAMP，避免 DEFAULT now() 导致建表失败
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=_SERVER_NOW,
+        server_onupdate=_SERVER_NOW if _IS_MYSQL else None,
+        onupdate=(func.now() if not _IS_MYSQL else None),
+        index=True,
+    )
 
 # DISABLE_DATABASE=true 可关闭统计数据库（例如无持久化磁盘的免费部署环境）
 DISABLE_DATABASE = env_bool("DISABLE_DATABASE", False)
