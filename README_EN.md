@@ -118,7 +118,7 @@ Below are the most common and most error-prone environment variables for cloud d
 
 | Variable | Example | Notes |
 |---|---|---|
-| `DATABASE_URL` | `postgresql://...` or `postgres://...` | PostgreSQL connection URL (choose one of PostgreSQL or D1). Stats/logs + config persistence depend on DB. |
+| `DATABASE_URL` | `postgresql://...` / `postgres://...` / `mysql://...` / `mysql+asyncmy://...` | Database URL (PostgreSQL or TiDB/MySQL; choose one of `DATABASE_URL` or Cloudflare D1). Stats/logs + config persistence depend on DB. |
 
 Render usually injects `PORT` automatically; Zoaholic will read `PORT` as the listening port.
 
