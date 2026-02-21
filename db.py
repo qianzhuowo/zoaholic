@@ -207,6 +207,17 @@ def _extract_mysql_ssl_connect_args(db_url: str) -> tuple[str, dict]:
                 # 证书不可用时不阻断启动，交给连接阶段报错更直观
                 pass
 
+    # TiDB Cloud Serverless 强制 TLS：若连接串未显式指定任何 SSL 参数，但目标是 tidbcloud.com，
+    # 则默认启用证书校验 + 主机名校验（等价于 VERIFY_IDENTITY）。
+    # 这样可以避免在 Render 等平台上因为“insecure transport prohibited”导致启动失败。
+    if "ssl" not in connect_args:
+        hostname = (parts.hostname or "").lower()
+        if hostname.endswith("tidbcloud.com") or hostname.endswith("tidbcloud.com.") or "tidbcloud.com" in hostname:
+            ctx = ssl_module.create_default_context(cafile=ssl_ca) if ssl_ca else ssl_module.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl_module.CERT_REQUIRED
+            connect_args["ssl"] = ctx
+
     new_query = urlencode(kept, doseq=True)
     clean_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
