@@ -1,0 +1,85 @@
+2026-02-20T13:56:10.858958531Z ==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+2026-02-20T13:56:10.876262579Z ==> Starting service...
+2026-02-20T13:56:38.053373417Z 2026-02-20 13:56:38,052 - Zoaholic - INFO - Using sqlite database.
+2026-02-20T13:56:38.053400988Z 2026-02-20 13:56:38,053 - Zoaholic - INFO - DATABASE_URL detected, using it for database connection.
+2026-02-20T13:56:38.544769457Z Traceback (most recent call last):
+2026-02-20T13:56:38.544784297Z   File "<frozen runpy>", line 198, in _run_module_as_main
+2026-02-20T13:56:38.544788058Z   File "<frozen runpy>", line 88, in _run_code
+2026-02-20T13:56:38.544791408Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/__main__.py", line 4, in <module>
+2026-02-20T13:56:38.544892183Z     uvicorn.main()
+2026-02-20T13:56:38.544898674Z   File "/usr/local/lib/python3.11/site-packages/click/core.py", line 1442, in __call__
+2026-02-20T13:56:38.545192359Z     return self.main(*args, **kwargs)
+2026-02-20T13:56:38.547236155Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547247486Z   File "/usr/local/lib/python3.11/site-packages/click/core.py", line 1363, in main
+2026-02-20T13:56:38.547251646Z     rv = self.invoke(ctx)
+2026-02-20T13:56:38.547254696Z          ^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547257446Z   File "/usr/local/lib/python3.11/site-packages/click/core.py", line 1226, in invoke
+2026-02-20T13:56:38.547260517Z     return ctx.invoke(self.callback, **ctx.params)
+2026-02-20T13:56:38.547263747Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547267207Z   File "/usr/local/lib/python3.11/site-packages/click/core.py", line 794, in invoke
+2026-02-20T13:56:38.547270307Z     return callback(*args, **kwargs)
+2026-02-20T13:56:38.547273437Z            ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547276457Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/main.py", line 413, in main
+2026-02-20T13:56:38.547279618Z     run(
+2026-02-20T13:56:38.547282648Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/main.py", line 580, in run
+2026-02-20T13:56:38.547286008Z     server.run()
+2026-02-20T13:56:38.547289348Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 67, in run
+2026-02-20T13:56:38.547292918Z     return asyncio.run(self.serve(sockets=sockets))
+2026-02-20T13:56:38.547296088Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547302109Z   File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+2026-02-20T13:56:38.547305149Z     return runner.run(main)
+2026-02-20T13:56:38.547307929Z            ^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547310839Z   File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+2026-02-20T13:56:38.547313919Z     return self._loop.run_until_complete(task)
+2026-02-20T13:56:38.54731694Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547320329Z   File "/usr/local/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+2026-02-20T13:56:38.5473237Z     return future.result()
+2026-02-20T13:56:38.54732724Z            ^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.54733078Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 71, in serve
+2026-02-20T13:56:38.54733313Z     await self._serve(sockets)
+2026-02-20T13:56:38.54733514Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/server.py", line 78, in _serve
+2026-02-20T13:56:38.54733745Z     config.load()
+2026-02-20T13:56:38.54733945Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/config.py", line 436, in load
+2026-02-20T13:56:38.547341531Z     self.loaded_app = import_from_string(self.app)
+2026-02-20T13:56:38.547343541Z                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547345971Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/importer.py", line 22, in import_from_string
+2026-02-20T13:56:38.547356142Z     raise exc from None
+2026-02-20T13:56:38.547358371Z   File "/usr/local/lib/python3.11/site-packages/uvicorn/importer.py", line 19, in import_from_string
+2026-02-20T13:56:38.547360442Z     module = importlib.import_module(module_str)
+2026-02-20T13:56:38.547362452Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547364542Z   File "/usr/local/lib/python3.11/importlib/__init__.py", line 126, in import_module
+2026-02-20T13:56:38.547505189Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-02-20T13:56:38.547556822Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.547562722Z   File "<frozen importlib._bootstrap>", line 1204, in _gcd_import
+2026-02-20T13:56:38.547566153Z   File "<frozen importlib._bootstrap>", line 1176, in _find_and_load
+2026-02-20T13:56:38.547569373Z   File "<frozen importlib._bootstrap>", line 1147, in _find_and_load_unlocked
+2026-02-20T13:56:38.547572223Z   File "<frozen importlib._bootstrap>", line 690, in _load_unlocked
+2026-02-20T13:56:38.547575163Z   File "<frozen importlib._bootstrap_external>", line 940, in exec_module
+2026-02-20T13:56:38.547578203Z   File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
+2026-02-20T13:56:38.547581513Z   File "/home/main.py", line 18, in <module>
+2026-02-20T13:56:38.547671918Z     from routes import api_router
+2026-02-20T13:56:38.547677598Z   File "/home/routes/__init__.py", line 12, in <module>
+2026-02-20T13:56:38.547759012Z     from routes.models import router as models_router
+2026-02-20T13:56:38.547809545Z   File "/home/routes/models.py", line 8, in <module>
+2026-02-20T13:56:38.547915911Z     from utils import post_all_models
+2026-02-20T13:56:38.547921651Z   File "/home/utils.py", line 16, in <module>
+2026-02-20T13:56:38.548023706Z     from db import async_session_scope, ChannelStat, AppConfig, DISABLE_DATABASE, DB_TYPE, d1_client
+2026-02-20T13:56:38.548029417Z   File "/home/db.py", line 347, in <module>
+2026-02-20T13:56:38.548573535Z     db_engine = create_async_engine(db_url, echo=is_debug)
+2026-02-20T13:56:38.548582315Z                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.548586466Z   File "/usr/local/lib/python3.11/site-packages/sqlalchemy/ext/asyncio/engine.py", line 120, in create_async_engine
+2026-02-20T13:56:38.548589666Z     sync_engine = _create_engine(url, **kw)
+2026-02-20T13:56:38.548592616Z                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.548595566Z   File "<string>", line 2, in create_engine
+2026-02-20T13:56:38.548598996Z   File "/usr/local/lib/python3.11/site-packages/sqlalchemy/util/deprecations.py", line 281, in warned
+2026-02-20T13:56:38.548602227Z     return fn(*args, **kwargs)  # type: ignore[no-any-return]
+2026-02-20T13:56:38.548615577Z            ^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.548631158Z   File "/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/create.py", line 617, in create_engine
+2026-02-20T13:56:38.548797277Z     dbapi = dbapi_meth(**dbapi_args)
+2026-02-20T13:56:38.548803167Z             ^^^^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.548806497Z   File "/usr/local/lib/python3.11/site-packages/sqlalchemy/dialects/mysql/mysqldb.py", line 167, in import_dbapi
+2026-02-20T13:56:38.548956365Z     return __import__("MySQLdb")
+2026-02-20T13:56:38.548961945Z            ^^^^^^^^^^^^^^^^^^^^^
+2026-02-20T13:56:38.548965055Z ModuleNotFoundError: No module named 'MySQLdb'
+2026-02-20T13:56:49.859823827Z ==> Exited with status 1
+2026-02-20T13:56:49.876846846Z ==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys

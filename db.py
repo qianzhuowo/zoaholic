@@ -74,24 +74,15 @@ D1_TIMEOUT_SECONDS = float(os.getenv("D1_TIMEOUT_SECONDS", "30"))
 # DB_TYPE：显式优先；否则根据 DATABASE_URL 自动推断；默认 sqlite
 _DB_TYPE_ENV = (os.getenv("DB_TYPE") or "").strip().lower()
 if _DB_TYPE_ENV:
-    # 兼容别名
-    if _DB_TYPE_ENV in ("tidb", "mariadb"):
-        DB_TYPE = "mysql"
-    else:
-        DB_TYPE = _DB_TYPE_ENV
+    DB_TYPE = _DB_TYPE_ENV
 elif DATABASE_URL:
     _url = DATABASE_URL.strip().lower()
     if _url.startswith("postgres://") or _url.startswith("postgresql://"):
         DB_TYPE = "postgres"
-    elif (
-        _url.startswith("mysql://")
-        or _url.startswith("mysql+")
-        or _url.startswith("mariadb://")
-        or _url.startswith("mariadb+")
-        or _url.startswith("tidb://")
-        or _url.startswith("tidb+")
-    ):
-        # TiDB / MySQL compatible
+    elif _url.startswith("mysql://") or _url.startswith("mariadb://"):
+        DB_TYPE = "mysql"
+    elif _url.startswith("mysql+") or _url.startswith("mariadb+"):
+        # 例如 mysql+asyncmy://... / mysql+pymysql://...
         DB_TYPE = "mysql"
     elif _url.startswith("sqlite://"):
         DB_TYPE = "sqlite"
@@ -126,31 +117,100 @@ def _normalize_database_url(url: str, db_type: str) -> str:
             return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
         return url
 
-    if db_type in ("mysql", "tidb"):
-        # TiDB / MySQL: mysql://user:pass@host:port/db
-        # SQLAlchemy async driver: mysql+asyncmy://...
-        # 允许用户显式指定 mysql+aiomysql / mysql+asyncmy。
-        lowered = url.lower()
-
-        if lowered.startswith("tidb://"):
-            return "mysql+asyncmy://" + url[len("tidb://") :]
-
-        if lowered.startswith("mysql://"):
+    if db_type == "mysql":
+        # TiDB / MySQL：强制使用异步驱动（asyncmy/aiomysql），避免落到 MySQLdb(mysqlclient)
+        # 常见: mysql://user:pass@host:port/db
+        if url.startswith("mysql://"):
             return "mysql+asyncmy://" + url[len("mysql://") :]
-        if lowered.startswith("mariadb://"):
+        if url.startswith("mariadb://"):
             return "mariadb+asyncmy://" + url[len("mariadb://") :]
 
-        # mysql+mysqldb:// / mysql+pymysql:// 等同步 driver，自动替换成 asyncmy
-        if (lowered.startswith("mysql+") and "+asyncmy" not in lowered and "+aiomysql" not in lowered) or (
-            lowered.startswith("mariadb+") and "+asyncmy" not in lowered and "+aiomysql" not in lowered
-        ):
-            if "://" in url:
-                _, rest = url.split("://", 1)
-                scheme = "mysql+asyncmy" if lowered.startswith("mysql+") else "mariadb+asyncmy"
-                return f"{scheme}://{rest}"
+        # 若用户提供的是同步驱动（如 mysql+pymysql:// 或 mysql+mysqldb://），这里尽量切换到 asyncmy
+        if url.startswith("mysql+") and "+asyncmy" not in url and "+aiomysql" not in url:
+            # mysql+pymysql://... -> mysql+asyncmy://...
+            return "mysql+asyncmy://" + url.split("://", 1)[1]
+        if url.startswith("mariadb+") and "+asyncmy" not in url and "+aiomysql" not in url:
+            return "mariadb+asyncmy://" + url.split("://", 1)[1]
         return url
 
     return url
+
+
+def _extract_mysql_ssl_connect_args(db_url: str) -> tuple[str, dict]:
+    """从 URL query 中提取 MySQL/TiDB SSL 参数，转换为驱动可识别的 connect_args。
+
+    背景：
+    - TiDB Cloud 通常需要 TLS 连接
+    - 用户可能会在 DATABASE_URL 上附带如 ssl_mode/ssl_ca 等参数
+    - 我们将其转为 `connect_args={"ssl": SSLContext | dict | bool}`
+    """
+
+    parts = urlsplit(db_url)
+    qsl = parse_qsl(parts.query, keep_blank_values=True)
+
+    ssl_mode = None
+    ssl_ca = None
+    ssl_cert = None
+    ssl_key = None
+    kept: list[tuple[str, str]] = []
+
+    for k, v in qsl:
+        lk = k.lower().replace("-", "_")
+        if lk in ("sslmode", "ssl_mode"):
+            ssl_mode = v
+        elif lk in ("ssl", "use_ssl", "usessl", "tls"):
+            # 一些平台/连接串会用 ?ssl=true 这种写法
+            vv = str(v).strip().lower()
+            if vv in ("0", "false", "off", "disable", "disabled"):
+                ssl_mode = "disabled"
+            elif vv in ("1", "true", "on", "require", "required", "yes"):
+                ssl_mode = ssl_mode or "required"
+        elif lk in ("sslrootcert", "ssl_ca", "sslca"):
+            ssl_ca = v
+        elif lk in ("sslcert", "ssl_cert"):
+            ssl_cert = v
+        elif lk in ("sslkey", "ssl_key"):
+            ssl_key = v
+        else:
+            kept.append((k, v))
+
+    connect_args: dict = {}
+
+    if ssl_mode or ssl_ca or ssl_cert or ssl_key:
+        mode = str(ssl_mode or "").strip().lower()
+
+        # MySQL/TiDB 常见语义：DISABLED / REQUIRED / VERIFY_CA / VERIFY_IDENTITY
+        if mode in ("disabled", "disable", "false", "0", "off"):
+            connect_args["ssl"] = False
+        elif mode in ("required", "require"):
+            ctx = ssl_module.create_default_context(cafile=ssl_ca) if ssl_ca else ssl_module.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl_module.CERT_NONE
+            connect_args["ssl"] = ctx
+        elif mode in ("verify_ca", "verify-ca"):
+            ctx = ssl_module.create_default_context(cafile=ssl_ca) if ssl_ca else ssl_module.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl_module.CERT_REQUIRED
+            connect_args["ssl"] = ctx
+        else:
+            # 默认按 VERIFY_IDENTITY/VERIFY_FULL 处理：校验证书链 + 校验主机名
+            ctx = ssl_module.create_default_context(cafile=ssl_ca) if ssl_ca else ssl_module.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl_module.CERT_REQUIRED
+            connect_args["ssl"] = ctx
+
+        # 若用户提供了客户端证书/私钥，也加载进去（可选）
+        if (ssl_cert or ssl_key) and isinstance(connect_args.get("ssl"), ssl_module.SSLContext):
+            try:
+                connect_args["ssl"].load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+            except Exception:
+                # 证书不可用时不阻断启动，交给连接阶段报错更直观
+                pass
+
+    new_query = urlencode(kept, doseq=True)
+    clean_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+    return clean_url, connect_args
 
 
 def _extract_asyncpg_ssl_connect_args(db_url: str) -> tuple[str, dict]:
@@ -216,117 +276,6 @@ def _extract_asyncpg_ssl_connect_args(db_url: str) -> tuple[str, dict]:
     new_query = urlencode(kept, doseq=True)
     clean_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
-    return clean_url, connect_args
-
-
-def _extract_mysql_ssl_connect_args(db_url: str) -> tuple[str, dict]:
-    """从 MySQL/TiDB URL query 中提取 SSL 参数，转换为 asyncmy/aiomysql 可识别的 connect_args。
-
-    常见 TiDB Cloud 连接串会带：
-    - ?ssl=true
-    - ?sslmode=require / verify-ca / verify-full
-    - ?ssl_ca=...（可选）
-
-    这些参数若直接透传给驱动，可能会以字符串形式传入导致连接失败；
-    因此这里统一转换为 `connect_args["ssl"] = SSLContext|False`。
-    """
-
-    parts = urlsplit(db_url)
-    qsl = parse_qsl(parts.query, keep_blank_values=True)
-
-    sslmode = None
-    ssl_flag = None
-    ssl_ca = None
-    ssl_cert = None
-    ssl_key = None
-    kept: list[tuple[str, str]] = []
-
-    for k, v in qsl:
-        lk = k.lower()
-        if lk in ("sslmode", "ssl_mode", "ssl-mode"):
-            sslmode = v
-        elif lk in ("ssl", "tls", "use_ssl"):
-            ssl_flag = v
-        elif lk in ("ssl_ca", "sslca", "ssl-ca", "sslrootcert", "ssl_root_cert"):
-            ssl_ca = v
-        elif lk in ("ssl_cert", "sslcert", "ssl-cert"):
-            ssl_cert = v
-        elif lk in ("ssl_key", "sslkey", "ssl-key"):
-            ssl_key = v
-        else:
-            kept.append((k, v))
-
-    connect_args: dict = {}
-
-    def _is_true(x: str | None) -> bool:
-        if x is None:
-            return False
-        return str(x).strip().lower() in ("1", "true", "yes", "y", "on", "require", "required")
-
-    def _is_false(x: str | None) -> bool:
-        if x is None:
-            return False
-        return str(x).strip().lower() in ("0", "false", "no", "n", "off", "disable", "disabled")
-
-    enable_ssl = False
-    verify_mode: str | None = None
-
-    if sslmode is not None:
-        m = str(sslmode).strip().lower()
-        if m in ("disable", "disabled", "off", "false", "0"):
-            enable_ssl = False
-        else:
-            enable_ssl = True
-            verify_mode = m
-
-    if ssl_flag is not None:
-        if _is_false(ssl_flag):
-            enable_ssl = False
-        elif _is_true(ssl_flag):
-            enable_ssl = True
-
-    if enable_ssl:
-        # 默认使用系统 CA；若传入 ssl_ca 则指定 cafile
-        ctx = (
-            ssl_module.create_default_context(cafile=ssl_ca)
-            if ssl_ca
-            else ssl_module.create_default_context()
-        )
-
-        # MySQL 的 sslmode 语义（尽量贴近 libpq 行为，但保持兼容）
-        # - require/required：加密但不强制校验（除非给了 ssl_ca）
-        # - verify-ca：校验 CA，但不校验主机名
-        # - verify-full/verify_identity：校验 CA + 校验主机名
-        mode = (verify_mode or "").lower()
-        if mode in ("require", "required", ""):
-            if ssl_ca:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl_module.CERT_REQUIRED
-            else:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl_module.CERT_NONE
-        elif mode in ("verify-ca", "verify_ca"):
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl_module.CERT_REQUIRED
-        else:
-            # verify-full / verify-identity / 其它：默认强校验
-            ctx.check_hostname = True
-            ctx.verify_mode = ssl_module.CERT_REQUIRED
-
-        if ssl_cert and ssl_key:
-            try:
-                ctx.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
-            except Exception:
-                # 证书路径不一定在容器内可用；失败时保持无客户端证书
-                pass
-
-        connect_args["ssl"] = ctx
-    elif sslmode is not None or ssl_flag is not None:
-        # 显式关闭
-        connect_args["ssl"] = False
-
-    new_query = urlencode(kept, doseq=True)
-    clean_url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
     return clean_url, connect_args
 
 
@@ -484,6 +433,7 @@ if not DISABLE_DATABASE:
         db_engine = create_async_engine(db_url, echo=is_debug, connect_args=connect_args)
 
     elif DB_TYPE == "mysql":
+        # TiDB 兼容（MySQL 协议）
         try:
             import asyncmy  # noqa: F401
         except ImportError:
@@ -499,16 +449,16 @@ if not DISABLE_DATABASE:
             DB_USER = os.getenv("DB_USER", "root")
             DB_PASSWORD = os.getenv("DB_PASSWORD", "")
             DB_HOST = os.getenv("DB_HOST", "localhost")
-            DB_PORT = os.getenv("DB_PORT", "3306")
-            DB_NAME = os.getenv("DB_NAME", "zoaholic")
+            DB_PORT = os.getenv("DB_PORT", "4000")  # TiDB 默认 4000
+            DB_NAME = os.getenv("DB_NAME", "test")
             db_url = f"mysql+asyncmy://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
+        # pool_pre_ping：Render 这类平台上空闲连接容易被断开；开启可减少偶发断连
         db_engine = create_async_engine(
             db_url,
             echo=is_debug,
             connect_args=connect_args,
             pool_pre_ping=True,
-            pool_recycle=3600,
         )
 
     elif DB_TYPE == "sqlite":
@@ -556,9 +506,7 @@ if not DISABLE_DATABASE:
                 timeout_seconds=D1_TIMEOUT_SECONDS,
             )
         else:
-            raise ValueError(
-                f"Unsupported DB_TYPE: {DB_TYPE}. Please use 'sqlite', 'postgres', 'mysql' or 'd1'."
-            )
+            raise ValueError(f"Unsupported DB_TYPE: {DB_TYPE}. Please use 'sqlite', 'postgres', 'mysql' or 'd1'.")
 
     if db_engine is not None:
         _legacy_async_session = sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)

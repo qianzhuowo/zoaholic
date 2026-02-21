@@ -18,9 +18,7 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 # 使用 uv export 导出依赖列表，然后安装到系统 Python
-# 注意：默认 export 会包含 "-e ."（当前项目本身）。builder 阶段尚未 COPY 源码，
-# 因此必须加 --no-emit-project，避免安装本项目导致构建失败。
-RUN uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt && \
+RUN uv export --frozen --no-dev --no-hashes -o requirements.txt && \
     uv pip install --system --no-cache -r requirements.txt
 
 # ===============

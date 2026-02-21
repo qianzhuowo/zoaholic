@@ -247,11 +247,9 @@ async def create_tables():
 
         # 检查并添加缺失的列 - 扩展此简易迁移以支持 SQLite 和 PostgreSQL
         db_type = (DB_TYPE or "sqlite").lower()
-        # 仅对支持标准 ALTER TABLE ADD COLUMN 的数据库做简易列迁移
-        if db_type in ["sqlite", "postgres", "mysql", "d1"]:
+        if db_type in ["sqlite", "postgres", "d1"]:
             def check_and_add_columns(connection):
                 inspector = inspect(connection)
-                preparer = connection.dialect.identifier_preparer
                 for table in [RequestStat, ChannelStat, AppConfig, AdminUser]:
                     table_name = table.__tablename__
                     existing_columns = {col['name'] for col in inspector.get_columns(table_name)}
@@ -267,11 +265,9 @@ async def create_tables():
                             default = _get_default_sql(column.default) if db_type == "sqlite" else ""
 
                             # 使用标准的 ALTER TABLE 语法
-                            quoted_table = preparer.quote(table_name)
-                            quoted_column = preparer.quote(column_name)
                             connection.execute(
                                 text(
-                                    f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {col_type}{default}"
+                                    f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {col_type}{default}'
                                 )
                             )
                             logger.info(
