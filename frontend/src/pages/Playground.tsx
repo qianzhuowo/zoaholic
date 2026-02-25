@@ -366,7 +366,7 @@ export default function Playground() {
         </div>
         <iframe
           src={getExternalLink(activeClient.link)}
-          className="flex-1 w-full border-0 bg-white"
+          className="flex-1 w-full border-0 bg-background"
           allow="clipboard-read; clipboard-write"
         />
       </div>
@@ -374,12 +374,12 @@ export default function Playground() {
   }
 
   return (
-    <div className="flex h-full animate-in fade-in duration-500 font-sans relative">
+    <div className="flex h-full animate-in fade-in duration-500 font-sans rounded-2xl overflow-hidden border border-border bg-muted/20 shadow-sm">
       {/* Left: Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-background">
+      <div className="flex-1 flex flex-col min-w-0 bg-background/60 backdrop-blur-sm border-r border-border">
 
         {/* Chat Header */}
-        <div className="h-14 border-b border-border flex items-center px-4 md:px-6 justify-between bg-card/80 backdrop-blur-sm z-10 flex-shrink-0">
+        <div className="h-14 border-b border-border flex items-center px-4 md:px-6 justify-between bg-background/60 backdrop-blur-sm z-10 flex-shrink-0">
           <div className="flex items-center gap-2 text-foreground font-bold">
             <Terminal className="w-5 h-5 text-primary" />
             <span className="hidden sm:inline">Console Playground</span>
@@ -407,7 +407,7 @@ export default function Playground() {
         </div>
 
         {/* Message List */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 py-8 space-y-6">
+        <div className="flex-1 overflow-y-auto px-4 md:px-10 py-8 space-y-6">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
               <Sparkles className="w-12 h-12 mb-4 opacity-50" />
@@ -416,7 +416,16 @@ export default function Playground() {
             </div>
           ) : (
             messages.map((msg, idx) => (
-              <div key={idx} className="flex flex-col max-w-4xl mx-auto w-full group">
+              <div
+                key={idx}
+                className={`flex flex-col max-w-4xl mx-auto w-full group ${
+                  msg.role === 'user'
+                    ? 'items-end'
+                    : msg.role === 'system'
+                      ? 'items-center'
+                      : 'items-start'
+                }`}
+              >
                 <div className="flex items-center gap-2 mb-2 text-xs font-medium text-muted-foreground">
                   {msg.role === 'user' ? (
                     <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-500"><MessageSquare className="w-3.5 h-3.5" /> User</span>
@@ -427,12 +436,12 @@ export default function Playground() {
                   )}
                 </div>
 
-                <div className={`p-4 rounded-xl border transition-colors ${
+                <div className={`w-fit max-w-[92%] p-4 rounded-2xl border shadow-sm transition-colors ${
                   msg.role === 'user'
-                    ? 'bg-muted/50 border-border text-foreground'
+                    ? 'bg-primary text-primary-foreground border-primary/30'
                     : msg.role === 'system'
-                      ? 'bg-red-500/5 border-red-500/20 text-foreground'
-                      : 'bg-transparent border-transparent text-foreground'
+                      ? 'bg-red-500/10 border-red-500/25 text-foreground'
+                      : 'bg-background/50 border-border text-foreground'
                 }`}>
 
                   {msg.reasoning_content && (
@@ -508,7 +517,7 @@ export default function Playground() {
         </div>
 
         {/* Input Area */}
-        <div className="p-4 md:px-12 bg-card border-t border-border flex-shrink-0">
+        <div className="p-4 md:px-10 bg-background/60 backdrop-blur-sm border-t border-border flex-shrink-0">
           <div className="max-w-4xl mx-auto relative bg-muted border border-border focus-within:border-primary rounded-xl overflow-hidden transition-colors">
             <textarea
               ref={textareaRef}
@@ -541,8 +550,8 @@ export default function Playground() {
 
 
       {/* Right: Parameters Panel */}
-      <div className="w-80 bg-card border-l border-border flex-shrink-0 flex-col hidden md:flex h-full">
-        <div className="h-14 border-b border-border flex items-center px-4 font-medium text-foreground gap-2 flex-shrink-0">
+      <div className="w-80 bg-background/40 backdrop-blur-sm border-l border-border flex-shrink-0 flex-col hidden md:flex h-full">
+        <div className="h-14 border-b border-border flex items-center px-4 font-medium text-foreground gap-2 flex-shrink-0 bg-background/40 backdrop-blur-sm">
           <Settings2 className="w-4 h-4 text-primary" />
           控制台参数
         </div>
