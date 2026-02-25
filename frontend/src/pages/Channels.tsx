@@ -102,6 +102,10 @@ export default function Channels() {
   const [modelDisplayKey, setModelDisplayKey] = useState(0);
 
   const COMMON_PARAMETER_FILTER_FIELDS: { key: string; label: string; hint?: string }[] = [
+    { key: 'temperature', label: 'temperature', hint: '部分渠道/模型（如部分推理模型）可能不接受 temperature' },
+    { key: 'top_p', label: 'top_p', hint: '部分渠道/模型可能不接受 top_p 或要求与 temperature 二选一' },
+    { key: 'presence_penalty', label: 'presence_penalty', hint: '部分 OpenAI 兼容实现不支持该字段' },
+    { key: 'frequency_penalty', label: 'frequency_penalty', hint: '部分 OpenAI 兼容实现不支持该字段' },
     { key: 'thinking', label: 'thinking', hint: '部分 OpenAI 兼容网关不支持该字段（常见于 Claude Thinking 相关）' },
     { key: 'min_p', label: 'min_p', hint: '常见扩展字段，很多兼容渠道会报 unknown field' },
     { key: 'top_k', label: 'top_k', hint: '常见扩展字段，很多兼容渠道会报 unknown field' },
