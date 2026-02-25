@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # ===============
 # Stage 1: Frontend build
 # ===============
@@ -15,7 +17,8 @@ RUN npm run build
 FROM python:3.11 AS builder
 WORKDIR /app
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.0
+COPY --from=${UV_IMAGE} /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 # 使用 uv export 导出依赖列表，然后安装到系统 Python
 # 注意：builder 阶段只拷贝了 pyproject.toml/uv.lock，没有拷贝项目源码。
@@ -23,8 +26,11 @@ COPY pyproject.toml uv.lock ./
 # 这里用 --no-emit-project 仅导出第三方依赖，避免在 CI/Docker 构建时报：
 #  - File '/app/README.md' cannot be found
 #  - package directory 'core' does not exist
-RUN uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt && \
-    uv pip install --system --no-cache -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --prefer-binary -r requirements.txt
 
 # ===============
 # Stage 3: Runtime

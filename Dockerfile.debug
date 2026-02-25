@@ -1,15 +1,21 @@
+# syntax=docker/dockerfile:1.7
+
 # Finale Strategie: Verwendung der gleichen funktionierenden Basis-Images wie für die Produktion
 # Stufe 1: Builder - Installiert Abhängigkeiten in die globalen Site-Packages
 FROM python:3.11 AS builder
 
 # uv installieren
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.0
+COPY --from=${UV_IMAGE} /uv /uvx /bin/
 
 WORKDIR /home
 COPY pyproject.toml uv.lock ./
 # 同生产镜像：仅安装第三方依赖，不在该阶段构建/安装当前项目本身（避免缺少源码文件时报错）
-RUN uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt && \
-    uv pip install --system --no-cache -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --prefer-binary -r requirements.txt
 
 # Stufe 2: Finales Debug-Image
 FROM python:3.11-slim-bullseye
