@@ -124,6 +124,30 @@ export default function Playground() {
       ? [{ role: 'system', content: systemPrompt }, ...msgList]
       : msgList;
 
+    const appendSystemError = (text: string) => {
+      const msg = (text || '未知错误').toString();
+      setMessages(prev => [...prev, { role: 'system', content: `请求失败：${msg}` }]);
+    };
+
+    const parseErrorFromResponse = async (res: Response) => {
+      const rawText = await res.text().catch(() => '');
+      if (!rawText) return `HTTP ${res.status}`;
+      try {
+        const data = JSON.parse(rawText);
+        if (data?.error) {
+          if (typeof data.error === 'string') return data.error;
+          if (typeof data.error === 'object') {
+            return data.error.message || data.error.detail || data.error.code || JSON.stringify(data.error);
+          }
+        }
+        if (data?.detail) return typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+        if (data?.message) return typeof data.message === 'string' ? data.message : JSON.stringify(data.message);
+        return rawText;
+      } catch {
+        return rawText;
+      }
+    };
+
     try {
       const res = await apiFetch('/v1/chat/completions', {
         method: 'POST',
@@ -139,7 +163,11 @@ export default function Playground() {
         })
       });
 
-      if (!res.ok) throw new Error('API Request Failed');
+      if (!res.ok) {
+        const errText = await parseErrorFromResponse(res);
+        appendSystemError(errText);
+        return;
+      }
 
       if (stream) {
         const reader = res.body?.getReader();
@@ -168,6 +196,52 @@ export default function Playground() {
 
             try {
               const data = JSON.parse(dataStr);
+
+              // 标准 OpenAI 风格错误：{"error": {"message": "..."}}
+              if (data?.error) {
+                const errMsg = typeof data.error === 'string'
+                  ? data.error
+                  : (data.error.message || data.error.detail || JSON.stringify(data.error));
+
+                try { await reader.cancel(); } catch { }
+                setMessages(prev => {
+                  // 结束 typing，并追加 system 错误
+                  const updated = [...prev];
+                  if (updated[assistantIndex]) {
+                    updated[assistantIndex] = {
+                      role: 'assistant',
+                      content: fullContent,
+                      reasoning_content: fullReasoning,
+                      isTyping: false,
+                    };
+                  }
+                  updated.push({ role: 'system', content: `请求失败：${errMsg}` });
+                  return updated;
+                });
+                return;
+              }
+
+              // 部分网关会把错误塞到 choices[0].error
+              const choiceErr = data?.choices?.[0]?.error;
+              if (choiceErr) {
+                const errMsg = choiceErr.message || JSON.stringify(choiceErr);
+                try { await reader.cancel(); } catch { }
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated[assistantIndex]) {
+                    updated[assistantIndex] = {
+                      role: 'assistant',
+                      content: fullContent,
+                      reasoning_content: fullReasoning,
+                      isTyping: false,
+                    };
+                  }
+                  updated.push({ role: 'system', content: `请求失败：${errMsg}` });
+                  return updated;
+                });
+                return;
+              }
+
               const delta = data.choices[0]?.delta;
 
               if (delta?.reasoning_content) {
@@ -204,6 +278,7 @@ export default function Playground() {
       }
     } catch (err) {
       console.error(err);
+      appendSystemError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsGenerating(false);
     }
@@ -345,12 +420,20 @@ export default function Playground() {
                 <div className="flex items-center gap-2 mb-2 text-xs font-medium text-muted-foreground">
                   {msg.role === 'user' ? (
                     <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-500"><MessageSquare className="w-3.5 h-3.5" /> User</span>
+                  ) : msg.role === 'system' ? (
+                    <span className="flex items-center gap-1 text-red-600 dark:text-red-400"><AlertCircle className="w-3.5 h-3.5" /> System</span>
                   ) : (
                     <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400"><Brain className="w-3.5 h-3.5" /> {selectedModel || 'Assistant'}</span>
                   )}
                 </div>
 
-                <div className={`p-4 rounded-xl border transition-colors ${msg.role === 'user' ? 'bg-muted/50 border-border text-foreground' : 'bg-transparent border-transparent text-foreground'}`}>
+                <div className={`p-4 rounded-xl border transition-colors ${
+                  msg.role === 'user'
+                    ? 'bg-muted/50 border-border text-foreground'
+                    : msg.role === 'system'
+                      ? 'bg-red-500/5 border-red-500/20 text-foreground'
+                      : 'bg-transparent border-transparent text-foreground'
+                }`}>
 
                   {msg.reasoning_content && (
                     <div className="mb-4 bg-muted/50 border border-border rounded-lg overflow-hidden">
