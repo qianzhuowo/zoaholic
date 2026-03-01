@@ -4,8 +4,13 @@ on:
   push:
     branches:
       - main
+      - master
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -60,6 +65,7 @@ PY
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -83,7 +89,8 @@ PY
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          # PR 只构建不推送；main/master/tag 才推送
+          push: ${{ github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master' || startsWith(github.ref, 'refs/tags/')) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
