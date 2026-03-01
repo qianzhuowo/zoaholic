@@ -42,14 +42,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION=$(python - <<'PY'
-import re
-
-text = open('pyproject.toml', 'r', encoding='utf-8').read()
-m = re.search(r"(?m)^version\s*=\s*(['\"])([^'\"]+)\1\s*$", text)
-print(m.group(2) if m else '')
-PY
-            )
+            VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           fi
           if [[ -z "$VERSION" ]]; then
             echo "::error::Failed to resolve version"
