@@ -41,6 +41,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
+          # pyproject.toml: requires-python >= 3.11
           python-version: '3.11'
 
       - name: Install build tools
@@ -52,15 +53,16 @@ jobs:
         id: resolve_version
         shell: bash
         run: |
+          # tag 触发：优先使用 tag（vX.Y.Z -> X.Y.Z）
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             VERSION=$(python - <<'PY'
-import re
-text = open('pyproject.toml', 'r', encoding='utf-8').read()
-m = re.search(r"(?m)^version\s*=\s*(['\"])([^'\"]+)\1\s*$", text)
-print(m.group(2) if m else '')
-PY
+          import re
+          text = open('pyproject.toml', 'r', encoding='utf-8').read()
+          m = re.search(r"(?m)^version\s*=\s*\"([^\"]+)\"\s*$", text)
+          print(m.group(1) if m else '')
+          PY
             )
           fi
 
@@ -71,21 +73,27 @@ PY
 
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Resolved VERSION=$VERSION"
 
       - name: Export dependencies (requirements.txt)
         shell: bash
         run: |
+          # 从 pyproject/uv.lock 导出 requirements.txt，供 pex 使用
           uv export --format requirements-txt --no-dev -o requirements.txt
+          echo "Exported requirements.txt:"
+          head -n 50 requirements.txt
 
       - name: Build PEX
         shell: bash
         run: |
           OUT="zoaholic-${{ matrix.platform }}-${{ matrix.arch }}-${VERSION}.pex"
+
           pex -D . -r requirements.txt \
             -c uvicorn \
             --inject-args 'main:app --host 0.0.0.0 --port 8000' \
             --interpreter-constraint '==3.11.*' \
             -o "$OUT"
+
           ls -lh "$OUT"
 
       - name: Upload artifact
@@ -107,7 +115,12 @@ PY
         with:
           path: dist
 
-      - name: Create GitHub Release
+      - name: List artifacts
+        shell: bash
+        run: |
+          ls -R dist
+
+      - name: Create GitHub Release (upload all PEX)
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

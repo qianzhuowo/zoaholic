@@ -29,6 +29,7 @@ jobs:
         id: image
         shell: bash
         run: |
+          # Docker image names must be lowercase.
           IMAGE="ghcr.io/${GITHUB_REPOSITORY}"
           IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
@@ -37,21 +38,18 @@ jobs:
         id: version
         shell: bash
         run: |
+          # Prefer git tag (vX.Y.Z) when building on tag push.
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION=$(python - <<'PY'
-import re
-text = open('pyproject.toml', 'r', encoding='utf-8').read()
-m = re.search(r"(?m)^version\s*=\s*(['\"])([^'\"]+)\1\s*$", text)
-print(m.group(2) if m else '')
-PY
-            )
+            VERSION=$(grep -E '^version\s*=\s*"' pyproject.toml | head -n 1 | cut -d'"' -f2)
           fi
+
           if [[ -z "$VERSION" ]]; then
             echo "::error::Failed to resolve version"
             exit 1
           fi
+
           echo "Resolved version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -65,6 +63,7 @@ PY
         id: platforms
         shell: bash
         run: |
+          # Tag 构建才做多架构，避免 main 分支每次提交都耗时过长
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
           else
