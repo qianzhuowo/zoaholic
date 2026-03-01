@@ -4,14 +4,13 @@ on:
   push:
     branches:
       - main
-      - master
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - main
-      - master
   workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,6 +19,7 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -42,7 +42,14 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+            VERSION=$(python - <<'PY'
+import re
+
+text = open('pyproject.toml', 'r', encoding='utf-8').read()
+m = re.search(r"(?m)^version\s*=\s*(['\"])([^'\"]+)\1\s*$", text)
+print(m.group(2) if m else '')
+PY
+            )
           fi
           if [[ -z "$VERSION" ]]; then
             echo "::error::Failed to resolve version"
@@ -57,8 +64,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Resolve build platforms
+        id: platforms
+        shell: bash
+        run: |
+          # Tag 构建才做多架构，避免 main 分支每次提交都耗时过长
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -81,10 +98,11 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # PR 只构建不推送；main/master/tag 才推送
-          push: ${{ github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'master' || startsWith(github.ref, 'refs/tags/')) }}
+          platforms: ${{ steps.platforms.outputs.platforms }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

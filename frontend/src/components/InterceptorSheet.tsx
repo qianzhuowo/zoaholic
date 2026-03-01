@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { 
   Puzzle, 
@@ -8,6 +8,8 @@ import {
   Check, 
   X,
 } from 'lucide-react';
+
+import { ParameterFilterEditorDialog } from './ParameterFilterEditorDialog';
 
 interface PluginOption {
   plugin_name: string;
@@ -34,404 +36,11 @@ interface InterceptorSheetProps {
   allPlugins: PluginOption[];
   enabledPlugins: string[]; // ["pluginA:config", "pluginB"]
   providerPreferences: Record<string, any>;
-  availableModels?: string[];
+  providerModels?: string[]; // 当前渠道已启用模型（用于某些插件的快速配置）
   onUpdate: (payload: { enabled_plugins: string[]; preferences_patch: Record<string, any>; preferences_delete: string[] }) => void;
 }
 
-const COMMON_PAYLOAD_FIELDS = [
-  'thinking',
-  'min_p',
-  'top_k',
-  'seed',
-  'response_format',
-  'stream_options.include_usage',
-  'parallel_tool_calls',
-  'max_completion_tokens',
-  'reasoning',
-  'tools',
-  'tool_choice',
-];
-
-type FilterMode = 'deny' | 'allow';
-
-function normalizeStringList(value: any): string[] {
-  if (!value) return [];
-  const arr = Array.isArray(value) ? value : [value];
-  return Array.from(new Set(arr.map(v => String(v).trim()).filter(Boolean)));
-}
-
-function parsePostBodyParameterFilter(text: string): {
-  mode: FilterMode;
-  use_defaults: boolean;
-  globalFields: string[];
-  rules: Array<{ model: string; modeOverride: '' | FilterMode; fields: string[] }>;
-} {
-  const defaults = { mode: 'deny' as FilterMode, use_defaults: true, globalFields: [] as string[], rules: [] as Array<{ model: string; modeOverride: '' | FilterMode; fields: string[] }> };
-
-  const t = (text || '').trim();
-  if (!t) return defaults;
-
-  const obj = JSON.parse(t);
-
-  // list => deny list
-  if (Array.isArray(obj)) {
-    return { ...defaults, globalFields: normalizeStringList(obj) };
-  }
-
-  if (obj && typeof obj === 'object') {
-    const hasDirect = ['deny', 'allow', 'mode', 'enabled', 'use_defaults'].some(k => Object.prototype.hasOwnProperty.call(obj, k));
-    if (hasDirect) {
-      const mode = (String((obj as any).mode || 'deny').toLowerCase() === 'allow' ? 'allow' : 'deny') as FilterMode;
-      const use_defaults = (obj as any).use_defaults !== undefined ? Boolean((obj as any).use_defaults) : true;
-      const globalFields = normalizeStringList(mode === 'allow' ? (obj as any).allow : (obj as any).deny);
-      return { mode, use_defaults, globalFields, rules: [] };
-    }
-
-    // { all: {...}, modelA: {...} }
-    const globalObj = (obj as any).all ?? (obj as any)['*'] ?? {};
-    const mode = (String(globalObj?.mode || 'deny').toLowerCase() === 'allow' ? 'allow' : 'deny') as FilterMode;
-    const use_defaults = globalObj?.use_defaults !== undefined ? Boolean(globalObj.use_defaults) : true;
-    const globalFields = normalizeStringList(mode === 'allow' ? globalObj?.allow : globalObj?.deny);
-
-    const rules: Array<{ model: string; modeOverride: '' | FilterMode; fields: string[] }> = [];
-    Object.keys(obj as any).forEach((k) => {
-      if (k === 'all' || k === '*') return;
-      const r = (obj as any)[k];
-      if (!r || typeof r !== 'object') return;
-      const rMode = r.mode ? ((String(r.mode).toLowerCase() === 'allow' ? 'allow' : 'deny') as FilterMode) : '';
-      const effectiveMode = (rMode || mode) as FilterMode;
-      const fields = normalizeStringList(effectiveMode === 'allow' ? (r as any).allow : (r as any).deny);
-      if (fields.length === 0 && !rMode) return;
-      rules.push({ model: k, modeOverride: rMode, fields });
-    });
-
-    return { mode, use_defaults, globalFields, rules };
-  }
-
-  return defaults;
-}
-
-function buildPostBodyParameterFilterConfig(state: {
-  mode: FilterMode;
-  use_defaults: boolean;
-  globalFields: string[];
-  rules: Array<{ model: string; modeOverride: '' | FilterMode; fields: string[] }>;
-}): any {
-  const all: any = {
-    mode: state.mode,
-    use_defaults: state.use_defaults,
-  };
-  if (state.mode === 'allow') all.allow = state.globalFields;
-  else all.deny = state.globalFields;
-
-  const cfg: any = { all };
-
-  for (const rule of state.rules) {
-    const model = String(rule.model || '').trim();
-    if (!model) continue;
-    const ruleMode = (rule.modeOverride || state.mode) as FilterMode;
-    const obj: any = {};
-    if (rule.modeOverride) obj.mode = rule.modeOverride;
-    if (ruleMode === 'allow') obj.allow = rule.fields;
-    else obj.deny = rule.fields;
-    cfg[model] = obj;
-  }
-
-  return cfg;
-}
-
-function PostBodyParameterFilterEditor(props: {
-  valueText: string;
-  onChangeText: (text: string) => void;
-  availableModels: string[];
-}) {
-  const { valueText, onChangeText, availableModels } = props;
-
-  const { parsed, parseError } = useMemo(() => {
-    try {
-      return {
-        parsed: parsePostBodyParameterFilter(valueText),
-        parseError: null as string | null,
-      };
-    } catch (e: any) {
-      return {
-        parsed: {
-          mode: 'deny' as FilterMode,
-          use_defaults: true,
-          globalFields: [],
-          rules: [],
-        },
-        parseError: e?.message || 'invalid json',
-      };
-    }
-  }, [valueText]);
-
-  const update = (patch: Partial<typeof parsed>) => {
-    const next = { ...parsed, ...patch };
-    const cfg = buildPostBodyParameterFilterConfig(next);
-    onChangeText(JSON.stringify(cfg, null, 2));
-  };
-
-  const addGlobalField = (field: string) => {
-    const f = String(field || '').trim();
-    if (!f) return;
-    update({ globalFields: Array.from(new Set([...parsed.globalFields, f])) });
-  };
-
-  const removeGlobalField = (field: string) => {
-    update({ globalFields: parsed.globalFields.filter(x => x !== field) });
-  };
-
-  const addRule = () => {
-    update({ rules: [...parsed.rules, { model: '', modeOverride: '', fields: [] }] });
-  };
-
-  const updateRule = (idx: number, patch: Partial<(typeof parsed.rules)[number]>) => {
-    const next = [...parsed.rules];
-    next[idx] = { ...next[idx], ...patch };
-    update({ rules: next });
-  };
-
-  const removeRule = (idx: number) => {
-    const next = parsed.rules.filter((_, i) => i !== idx);
-    update({ rules: next });
-  };
-
-  const addRuleField = (idx: number, field: string) => {
-    const f = String(field || '').trim();
-    if (!f) return;
-    const next = [...parsed.rules];
-    next[idx] = { ...next[idx], fields: Array.from(new Set([...(next[idx].fields || []), f])) };
-    update({ rules: next });
-  };
-
-  const removeRuleField = (idx: number, field: string) => {
-    const next = [...parsed.rules];
-    next[idx] = { ...next[idx], fields: (next[idx].fields || []).filter(x => x !== field) };
-    update({ rules: next });
-  };
-
-  return (
-    <div className="space-y-4">
-      {parseError && (
-        <div className="text-xs text-red-600 dark:text-red-400">
-          当前 JSON 解析失败：{parseError}（将基于默认值继续编辑）
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-muted-foreground">模式</label>
-          <select
-            value={parsed.mode}
-            onChange={(e) => update({ mode: (e.target.value === 'allow' ? 'allow' : 'deny') as FilterMode })}
-            className="w-full bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm"
-          >
-            <option value="deny">deny（移除字段）</option>
-            <option value="allow">allow（仅保留字段）</option>
-          </select>
-        </div>
-
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-muted-foreground">内置默认过滤</label>
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={parsed.use_defaults}
-              onChange={(e) => update({ use_defaults: e.target.checked })}
-              className="w-4 h-4"
-            />
-            <span className="text-xs text-muted-foreground">叠加 Zoaholic 内置的兼容性 deny 列表</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Global */}
-      <div className="space-y-2">
-        <label className="text-xs font-medium text-muted-foreground">全局规则（all）</label>
-
-        <div className="flex flex-wrap gap-2">
-          {parsed.globalFields.length === 0 ? (
-            <span className="text-xs text-muted-foreground italic">暂无字段</span>
-          ) : (
-            parsed.globalFields.map((f) => (
-              <span key={f} className="text-xs bg-muted px-2 py-1 rounded flex items-center gap-1 font-mono">
-                {f}
-                <button onClick={() => removeGlobalField(f)} className="text-muted-foreground hover:text-red-500">
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <select
-            onChange={(e) => {
-              if (e.target.value) addGlobalField(e.target.value);
-              e.currentTarget.value = '';
-            }}
-            className="w-full bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono"
-            defaultValue=""
-          >
-            <option value="" disabled>+ 常用字段</option>
-            {COMMON_PAYLOAD_FIELDS.map(f => (
-              <option key={f} value={f}>{f}</option>
-            ))}
-          </select>
-
-          <div className="flex gap-2">
-            <input
-              type="text"
-              list="post_body_parameter_filter_common_fields"
-              placeholder="自定义字段（可含 dot-path）"
-              className="flex-1 bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono outline-none"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  addGlobalField((e.target as HTMLInputElement).value);
-                  (e.target as HTMLInputElement).value = '';
-                }
-              }}
-            />
-            <button
-              type="button"
-              onClick={(e) => {
-                const input = (e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement | null);
-                if (!input) return;
-                addGlobalField(input.value);
-                input.value = '';
-              }}
-              className="px-3 py-2 text-sm font-medium text-emerald-600 dark:text-emerald-500 bg-emerald-500/10 rounded-md"
-            >
-              添加
-            </button>
-          </div>
-        </div>
-
-        <datalist id="post_body_parameter_filter_common_fields">
-          {COMMON_PAYLOAD_FIELDS.map(f => <option key={f} value={f} />)}
-        </datalist>
-      </div>
-
-      {/* Per-model */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-medium text-muted-foreground">按模型单独配置</label>
-          <button
-            type="button"
-            onClick={addRule}
-            className="text-xs font-medium text-emerald-600 dark:text-emerald-500 hover:text-emerald-500 px-2 py-1 bg-emerald-500/10 rounded"
-          >
-            + 新增规则
-          </button>
-        </div>
-
-        {parsed.rules.length === 0 ? (
-          <div className="text-xs text-muted-foreground italic">暂无模型规则</div>
-        ) : (
-          <div className="space-y-3">
-            {parsed.rules.map((r, idx) => (
-              <div key={idx} className="border border-border rounded-lg p-3 bg-background space-y-2">
-                <div className="flex items-center gap-2">
-                  <select
-                    value={r.model}
-                    onChange={(e) => updateRule(idx, { model: e.target.value })}
-                    className="flex-1 bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono"
-                  >
-                    <option value="">选择模型...</option>
-                    {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-
-                  <select
-                    value={r.modeOverride}
-                    onChange={(e) => updateRule(idx, { modeOverride: (e.target.value as any) || '' })}
-                    className="bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm"
-                    title="可选：覆盖全局模式"
-                  >
-                    <option value="">继承全局</option>
-                    <option value="deny">deny</option>
-                    <option value="allow">allow</option>
-                  </select>
-
-                  <button
-                    type="button"
-                    onClick={() => removeRule(idx)}
-                    className="text-red-600 dark:text-red-400 hover:text-red-500"
-                    title="删除规则"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {(r.fields || []).length === 0 ? (
-                    <span className="text-xs text-muted-foreground italic">暂无字段</span>
-                  ) : (
-                    (r.fields || []).map((f) => (
-                      <span key={f} className="text-xs bg-muted px-2 py-1 rounded flex items-center gap-1 font-mono">
-                        {f}
-                        <button onClick={() => removeRuleField(idx, f)} className="text-muted-foreground hover:text-red-500">
-                          <X className="w-3 h-3" />
-                        </button>
-                      </span>
-                    ))
-                  )}
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <select
-                    onChange={(e) => {
-                      if (e.target.value) addRuleField(idx, e.target.value);
-                      e.currentTarget.value = '';
-                    }}
-                    className="w-full bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono"
-                    defaultValue=""
-                  >
-                    <option value="" disabled>+ 常用字段</option>
-                    {COMMON_PAYLOAD_FIELDS.map(f => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </select>
-
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      list="post_body_parameter_filter_common_fields"
-                      placeholder="自定义字段"
-                      className="flex-1 bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono outline-none"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          addRuleField(idx, (e.target as HTMLInputElement).value);
-                          (e.target as HTMLInputElement).value = '';
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        const input = (e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement | null);
-                        if (!input) return;
-                        addRuleField(idx, input.value);
-                        input.value = '';
-                      }}
-                      className="px-3 py-2 text-sm font-medium text-emerald-600 dark:text-emerald-500 bg-emerald-500/10 rounded-md"
-                    >
-                      添加
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugins, providerPreferences, availableModels, onUpdate }: InterceptorSheetProps) {
+export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugins, providerPreferences, providerModels, onUpdate }: InterceptorSheetProps) {
   // Parsing helpers
   const parseEntry = (entry: string) => {
     // 约定：enabled_plugins 的单条配置使用“第一个冒号”分隔 name 与 options。
@@ -448,6 +57,8 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
   const [selected, setSelected] = useState<Map<string, string>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [providerConfigText, setProviderConfigText] = useState<Map<string, string>>(new Map());
+
+  const [filterEditorOpen, setFilterEditorOpen] = useState(false);
 
   // Re-init when opening (important: same sheet instance is reused across different providers)
   useEffect(() => {
@@ -480,35 +91,32 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
     setProviderConfigText(cfgMap);
   }, [open, enabledPlugins, allPlugins, providerPreferences]);
 
+  useEffect(() => {
+    if (!open) {
+      setFilterEditorOpen(false);
+    }
+  }, [open]);
+
   // Handlers
   const toggleSelect = (pluginName: string) => {
-    const isSelecting = !selected.has(pluginName);
-
     setSelected(prev => {
       const next = new Map(prev);
       const wasSelected = next.has(pluginName);
       if (wasSelected) next.delete(pluginName);
       else next.set(pluginName, '');
+
+      // post_body_parameter_filter：启用时自动弹出单独编辑窗口
+      if (!wasSelected && pluginName === 'post_body_parameter_filter') {
+        // 确保展开
+        setExpanded(prevExpanded => {
+          const s = new Set(prevExpanded);
+          s.add(pluginName);
+          return s;
+        });
+        setTimeout(() => setFilterEditorOpen(true), 0);
+      }
       return next;
     });
-
-    // 对 post_body_parameter_filter：首次启用时自动填入一个最小默认配置，避免“启用但未生效”
-    if (isSelecting && pluginName === 'post_body_parameter_filter') {
-      setProviderConfigText(prev => {
-        const next = new Map(prev);
-        const cur = (next.get(pluginName) || '').trim();
-        if (!cur) {
-          const cfg = buildPostBodyParameterFilterConfig({
-            mode: 'deny',
-            use_defaults: true,
-            globalFields: [],
-            rules: [],
-          });
-          next.set(pluginName, JSON.stringify(cfg, null, 2));
-        }
-        return next;
-      });
-    }
   };
 
   const updateOptions = (pluginName: string, options: string) => {
@@ -593,6 +201,17 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
     onOpenChange(false);
   };
 
+  const getFilterEditorInitialConfig = (): any => {
+    const raw = providerConfigText.get('post_body_parameter_filter') || '';
+    const t = raw.trim();
+    if (!t) return null;
+    try {
+      return JSON.parse(t);
+    } catch {
+      return null;
+    }
+  };
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -631,6 +250,7 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
                 const isSelected = selected.has(plugin.plugin_name);
                 const isExpanded = expanded.has(plugin.plugin_name);
                 const options = selected.get(plugin.plugin_name) || '';
+                const isParameterFilter = plugin.plugin_name === 'post_body_parameter_filter';
 
                 return (
                   <div key={plugin.plugin_name} className={`border rounded-lg transition-colors ${isSelected ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-border bg-card'}`}>
@@ -671,7 +291,7 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
                           />
                         </div>
 
-                        {plugin.metadata?.provider_config?.key && isSelected && (
+                        {plugin.metadata?.provider_config?.key && (
                           <div className="space-y-2 mt-4">
                             <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
                               <Settings2 className="w-3.5 h-3.5" />
@@ -682,12 +302,35 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
                               <p className="text-xs text-muted-foreground">{plugin.metadata.provider_config.description}</p>
                             )}
 
-                            {plugin.plugin_name === 'post_body_parameter_filter' ? (
-                              <PostBodyParameterFilterEditor
-                                valueText={providerConfigText.get(plugin.plugin_name) || ''}
-                                onChangeText={(text) => updateProviderConfigText(plugin.plugin_name, text)}
-                                availableModels={Array.from(new Set((availableModels || []).map(x => String(x).trim()).filter(Boolean)))}
-                              />
+                            {isParameterFilter ? (
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-xs text-muted-foreground">
+                                    参数过滤插件建议使用“高级编辑器”配置（支持按模型快速新增规则）。
+                                  </p>
+                                  <button
+                                    type="button"
+                                    disabled={!isSelected}
+                                    onClick={() => setFilterEditorOpen(true)}
+                                    className="text-xs font-medium text-primary hover:text-primary/80 px-2 py-1 bg-primary/10 rounded disabled:opacity-50"
+                                  >
+                                    打开高级编辑器
+                                  </button>
+                                </div>
+
+                                <textarea
+                                  value={providerConfigText.get(plugin.plugin_name) || ''}
+                                  onChange={(e) => updateProviderConfigText(plugin.plugin_name, e.target.value)}
+                                  disabled={!isSelected}
+                                  rows={6}
+                                  placeholder={
+                                    plugin.metadata?.provider_config?.example
+                                      ? JSON.stringify(plugin.metadata.provider_config.example, null, 2)
+                                      : '请输入 JSON'
+                                  }
+                                  className="w-full bg-background border border-border text-foreground focus:border-emerald-500 px-3 py-2 rounded-md text-sm font-mono disabled:opacity-50 outline-none"
+                                />
+                              </div>
                             ) : (
                               <textarea
                                 value={providerConfigText.get(plugin.plugin_name) || ''}
@@ -759,6 +402,16 @@ export function InterceptorSheet({ open, onOpenChange, allPlugins, enabledPlugin
 
         </Dialog.Content>
       </Dialog.Portal>
+
+      <ParameterFilterEditorDialog
+        open={filterEditorOpen}
+        onOpenChange={setFilterEditorOpen}
+        availableModels={providerModels || []}
+        initialConfig={getFilterEditorInitialConfig()}
+        onSave={(cfg) => {
+          updateProviderConfigText('post_body_parameter_filter', JSON.stringify(cfg, null, 2));
+        }}
+      />
     </Dialog.Root>
   );
 }

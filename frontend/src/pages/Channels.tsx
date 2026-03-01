@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useState, KeyboardEvent, ClipboardEvent } from 'react';
+import { useEffect, useState, KeyboardEvent, ClipboardEvent } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
 import {
   Plus, Edit, Brain, Trash2, ArrowRight, RefreshCw,
   Server, X, CheckCircle2, Settings2, Copy, ToggleRight, ToggleLeft,
   Folder, MemoryStick, Puzzle, Network, CopyCheck, Power, Files, Play,
-  Search, Check,
-  Loader2, XCircle, Clock
+  Search, Check
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
 import { InterceptorSheet } from '../components/InterceptorSheet';
 import { ChannelTestDialog } from '../components/ChannelTestDialog';
+import { ApiKeyTestDialog } from '../components/ApiKeyTestDialog';
 
 // ========== Types ==========
 interface ApiKeyObj {
@@ -37,14 +37,6 @@ interface ProviderFormData {
   // 注意：preferences 允许包含任意插件的 per-provider 配置。
   // 因此这里用 Record<string, any>，避免为每个插件都在 Channels 页面硬编码字段。
   preferences: Record<string, any>;
-}
-
-interface KeyTestResult {
-  status: 'pending' | 'testing' | 'success' | 'error';
-  latency: number | null;
-  upstream_status_code: number | null;
-  invalid: boolean;
-  error: string | null;
 }
 
 interface ChannelOption {
@@ -88,15 +80,11 @@ export default function Channels() {
   const [showPluginSheet, setShowPluginSheet] = useState(false);
   const [testDialogOpen, setTestDialogOpen] = useState(false);
   const [testingProvider, setTestingProvider] = useState<any>(null);
+  const [keyTestDialogOpen, setKeyTestDialogOpen] = useState(false);
+  const [keyTestInitialIndex, setKeyTestInitialIndex] = useState<number | null>(null);
   const [headersJson, setHeadersJson] = useState('');
   const [overridesJson, setOverridesJson] = useState('');
   const [modelDisplayKey, setModelDisplayKey] = useState(0);
-
-  // API Key 测试
-  const [keyTestModel, setKeyTestModel] = useState('');
-  const [keyTestConcurrency, setKeyTestConcurrency] = useState(3);
-  const [keyTestResults, setKeyTestResults] = useState<Map<number, KeyTestResult>>(new Map());
-  const [isKeyTesting, setIsKeyTesting] = useState(false);
 
   const [isFetchModelsOpen, setIsFetchModelsOpen] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -104,27 +92,6 @@ export default function Channels() {
   const [modelSearchQuery, setModelSearchQuery] = useState('');
 
   const { token } = useAuthStore();
-
-  const availableModelAliases = useMemo(() => {
-    if (!formData) return [] as string[];
-    const aliases = [
-      ...(formData.models || []),
-      ...((formData.mappings || []).map(m => m.from).filter(Boolean)),
-    ];
-    return Array.from(new Set(aliases.map(s => String(s).trim()).filter(Boolean))).sort();
-  }, [formData]);
-
-  // 打开编辑弹窗 / 切换渠道时：重置 Key 测试状态
-  useEffect(() => {
-    if (!isModalOpen) return;
-    setKeyTestResults(new Map());
-    setIsKeyTesting(false);
-    setKeyTestConcurrency(3);
-    setKeyTestModel(prev => {
-      if (prev && availableModelAliases.includes(prev)) return prev;
-      return availableModelAliases[0] || '';
-    });
-  }, [isModalOpen, availableModelAliases]);
 
   const fetchInitialData = async () => {
     try {
@@ -310,143 +277,6 @@ export default function Channels() {
     if (formData.api_keys.length === 0) return;
     if (!confirm('确定要清空该渠道的全部密钥吗？此操作仅影响当前编辑中的渠道配置，保存后才会生效。')) return;
     updateFormData('api_keys', []);
-  };
-
-  const buildProviderSnapshotForTest = () => {
-    if (!formData) return null;
-
-    let headersObj: any = undefined;
-    let overridesObj: any = undefined;
-    try {
-      if (headersJson.trim()) headersObj = JSON.parse(headersJson);
-      if (overridesJson.trim()) overridesObj = JSON.parse(overridesJson);
-    } catch (e) {
-      alert('高级配置 JSON 格式错误（headers / overrides）');
-      return null;
-    }
-
-    const serializedKeys = formData.api_keys
-      .map(k => k.disabled ? `!${k.key.trim()}` : k.key.trim())
-      .filter(Boolean);
-    const finalApi = serializedKeys.length === 0 ? '' : serializedKeys.length === 1 ? serializedKeys[0] : serializedKeys;
-
-    const finalModels: any[] = [...(formData.models || [])];
-    (formData.mappings || []).forEach(m => {
-      if (m.from && m.to) finalModels.push({ [m.to]: m.from });
-    });
-
-    return {
-      provider: formData.provider,
-      base_url: formData.base_url,
-      model_prefix: formData.model_prefix || undefined,
-      api: finalApi,
-      model: finalModels,
-      engine: formData.engine || undefined,
-      enabled: formData.enabled,
-      groups: formData.groups,
-      preferences: {
-        ...(formData.preferences || {}),
-        headers: headersObj,
-        post_body_parameter_overrides: overridesObj,
-      },
-    };
-  };
-
-  const getKeyTestStatusIcon = (r?: KeyTestResult) => {
-    if (!r) return <Clock className="w-4 h-4 text-muted-foreground" />;
-    if (r.status === 'testing') return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
-    if (r.status === 'success') return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
-    if (r.status === 'error') return <XCircle className="w-4 h-4 text-red-500" />;
-    return <Clock className="w-4 h-4 text-muted-foreground" />;
-  };
-
-  const runApiKeyTests = async (indices: number[], autoDisableInvalid: boolean) => {
-    if (!formData) return;
-    if (!keyTestModel) {
-      alert('请先选择用于测试的模型');
-      return;
-    }
-
-    const providerSnapshot = buildProviderSnapshotForTest();
-    if (!providerSnapshot) return;
-
-    const targets = indices
-      .map(i => ({ index: i, key: formData.api_keys[i]?.key?.trim() || '', disabled: formData.api_keys[i]?.disabled }))
-      .filter(x => x.key && !x.disabled);
-
-    if (targets.length === 0) {
-      alert('没有可测试的启用 Key');
-      return;
-    }
-
-    setIsKeyTesting(true);
-    setKeyTestResults(prev => {
-      const next = new Map(prev);
-      targets.forEach(t => {
-        next.set(t.index, { status: 'testing', latency: null, upstream_status_code: null, invalid: false, error: null });
-      });
-      return next;
-    });
-
-    try {
-      const res = await apiFetch('/v1/channels/test_api_keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          provider_snapshot: providerSnapshot,
-          engine: providerSnapshot.engine || formData.engine || 'openai',
-          base_url: providerSnapshot.base_url,
-          model: keyTestModel,
-          timeout: 30,
-          concurrency: keyTestConcurrency,
-          api_keys: targets.map(t => ({ index: t.index, key: t.key })),
-        }),
-      });
-
-      const data = await res.json().catch(() => ({} as any));
-      if (!res.ok || !data?.success) {
-        alert(`测试失败：${data?.detail || data?.error || data?.message || res.status}`);
-        return;
-      }
-
-      const results: any[] = Array.isArray(data?.results) ? data.results : [];
-
-      setKeyTestResults(prev => {
-        const next = new Map(prev);
-        results.forEach((r: any) => {
-          const idx = typeof r?.index === 'number' ? r.index : null;
-          if (idx === null) return;
-          const success = Boolean(r?.success);
-          const invalid = Boolean(r?.is_invalid_api_key);
-          next.set(idx, {
-            status: success ? 'success' : 'error',
-            latency: typeof r?.latency_ms === 'number' ? r.latency_ms : null,
-            upstream_status_code: typeof r?.upstream_status_code === 'number' ? r.upstream_status_code : null,
-            invalid,
-            error: r?.error || null,
-          });
-        });
-        return next;
-      });
-
-      if (autoDisableInvalid) {
-        const invalidIdx = results
-          .filter(r => r?.is_invalid_api_key)
-          .map(r => r?.index)
-          .filter((x: any) => typeof x === 'number');
-
-        if (invalidIdx.length > 0) {
-          updateFormData('api_keys', formData.api_keys.map((k, i) => invalidIdx.includes(i) ? { ...k, disabled: true } : k));
-          alert(`已测试 ${targets.length} 个 Key，自动禁用 ${invalidIdx.length} 个疑似失效 Key（记得点击保存生效）`);
-        } else {
-          alert(`已测试 ${targets.length} 个 Key，未发现失效 Key`);
-        }
-      }
-    } catch (e: any) {
-      alert(`测试失败：${e?.message || '网络错误'}`);
-    } finally {
-      setIsKeyTesting(false);
-    }
   };
 
   const handleGroupInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -703,6 +533,78 @@ export default function Channels() {
   const openTestDialog = (provider: any) => {
     setTestingProvider(provider);
     setTestDialogOpen(true);
+  };
+
+  const openKeyTestDialog = (initialIndex: number | null = null) => {
+    setKeyTestInitialIndex(initialIndex);
+    setKeyTestDialogOpen(true);
+  };
+
+  const buildProviderSnapshotForTest = (): any => {
+    if (!formData) return null;
+
+    const serializedKeys = formData.api_keys
+      .map(k => k.disabled ? `!${k.key.trim()}` : k.key.trim())
+      .filter(Boolean);
+    const finalApi = serializedKeys.length === 0 ? "" : serializedKeys.length === 1 ? serializedKeys[0] : serializedKeys;
+
+    const finalModels: any[] = [...formData.models];
+    formData.mappings.forEach(m => {
+      if (m.from && m.to) finalModels.push({ [m.to]: m.from });
+    });
+
+    let headersObj: any = undefined;
+    let overridesObj: any = undefined;
+    try {
+      if (headersJson.trim()) headersObj = JSON.parse(headersJson);
+    } catch {
+      headersObj = undefined;
+    }
+    try {
+      if (overridesJson.trim()) overridesObj = JSON.parse(overridesJson);
+    } catch {
+      overridesObj = undefined;
+    }
+
+    return {
+      provider: formData.provider,
+      base_url: formData.base_url,
+      model_prefix: formData.model_prefix || undefined,
+      api: finalApi,
+      model: finalModels,
+      engine: formData.engine || undefined,
+      enabled: formData.enabled,
+      groups: formData.groups,
+      preferences: {
+        ...formData.preferences,
+        headers: headersObj,
+        post_body_parameter_overrides: overridesObj,
+      },
+    };
+  };
+
+  const getProviderModelNameListForUi = (): string[] => {
+    if (!formData) return [];
+    // 这里提供“可请求的模型别名列表”，优先展示/返回别名。
+    const aliasMap = getAliasMap(); // upstream -> alias
+    const names: string[] = [];
+    // 1) 正常模型（字符串）
+    formData.models.forEach(upstream => {
+      const alias = aliasMap.get(upstream);
+      names.push(alias || upstream);
+    });
+    // 2) 映射中的 alias
+    formData.mappings.forEach(m => {
+      if (m.from) names.push(m.from);
+    });
+    return Array.from(new Set(names.map(s => String(s || '').trim()).filter(Boolean)));
+  };
+
+  const disableKeysInForm = (indices: number[]) => {
+    if (!formData || !indices.length) return;
+    const set = new Set(indices);
+    const next = formData.api_keys.map((k, idx) => set.has(idx) ? ({ ...k, disabled: true }) : k);
+    updateFormData('api_keys', next);
   };
 
   const handleSave = async () => {
@@ -1032,6 +934,14 @@ export default function Channels() {
                     <div className="flex items-center gap-2 text-xs">
                       <button onClick={copyAllKeys} className="text-muted-foreground hover:text-foreground flex items-center gap-1"><Copy className="w-3 h-3" /> 复制全部</button>
                       <button
+                        onClick={() => openKeyTestDialog(null)}
+                        disabled={formData.api_keys.length === 0}
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="测试该渠道中的全部 Key（可选自动禁用失效 Key）"
+                      >
+                        <Play className="w-3 h-3" /> 多key测试
+                      </button>
+                      <button
                         onClick={clearAllKeys}
                         disabled={formData.api_keys.length === 0}
                         className="text-red-600 dark:text-red-500 hover:text-red-700 dark:hover:text-red-400 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1042,57 +952,6 @@ export default function Channels() {
                       <button onClick={addEmptyKey} className="text-primary hover:text-primary/80 flex items-center gap-1"><Plus className="w-3 h-3" /> 添加密钥</button>
                     </div>
                   </div>
-
-                  {/* Key 测试工具栏 */}
-                  <div className="flex flex-wrap items-center gap-2 mb-2 text-xs">
-                    <span className="text-muted-foreground">测试模型:</span>
-                    <select
-                      value={keyTestModel}
-                      onChange={(e) => setKeyTestModel(e.target.value)}
-                      className="bg-background border border-border rounded px-2 py-1 font-mono text-foreground"
-                      disabled={availableModelAliases.length === 0}
-                      title={availableModelAliases.length === 0 ? '请先配置模型' : '选择用于测试的模型'}
-                    >
-                      {availableModelAliases.length === 0 ? (
-                        <option value="">（未配置模型）</option>
-                      ) : (
-                        availableModelAliases.map(m => (
-                          <option key={m} value={m}>{m}</option>
-                        ))
-                      )}
-                    </select>
-
-                    <span className="text-muted-foreground">并发:</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={keyTestConcurrency}
-                      onChange={(e) => setKeyTestConcurrency(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
-                      className="w-14 bg-background border border-border rounded px-2 py-1 text-center font-mono text-foreground"
-                    />
-
-                    <button
-                      type="button"
-                      disabled={isKeyTesting || availableModelAliases.length === 0}
-                      onClick={() => runApiKeyTests(formData.api_keys.map((_, i) => i), false)}
-                      className="px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/15 disabled:opacity-50 flex items-center gap-1"
-                      title="一键测试该渠道中所有启用的 Key"
-                    >
-                      <Play className="w-3 h-3" /> 测试全部 Key
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isKeyTesting || availableModelAliases.length === 0}
-                      onClick={() => runApiKeyTests(formData.api_keys.map((_, i) => i), true)}
-                      className="px-2 py-1 rounded bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/15 disabled:opacity-50 flex items-center gap-1"
-                      title="测试全部 Key，并自动禁用疑似失效 Key（需要保存后生效）"
-                    >
-                      <XCircle className="w-3 h-3" /> 测试并禁用失效
-                    </button>
-                  </div>
-
                   <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                     {formData.api_keys.map((keyObj, idx) => (
                       <div key={idx} className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${keyObj.disabled ? 'bg-muted/30 border-border opacity-60' : 'bg-muted/50 border-border'}`}>
@@ -1105,32 +964,16 @@ export default function Channels() {
                           placeholder="sk-..."
                           className={`flex-1 bg-transparent border-none text-sm font-mono outline-none min-w-0 ${keyObj.disabled ? 'text-muted-foreground line-through' : 'text-foreground'}`}
                         />
-
-                        <div
-                          className="w-5 h-5 flex items-center justify-center"
-                          title={(() => {
-                            const r = keyTestResults.get(idx);
-                            if (!r) return '未测试';
-                            if (r.status === 'testing') return '正在测试...';
-                            if (r.status === 'success') return `成功 ${r.latency ?? '-'}ms`; 
-                            return `${r.invalid ? '疑似失效' : '失败'}: ${r.error || ''}`;
-                          })()}
-                        >
-                          {getKeyTestStatusIcon(keyTestResults.get(idx))}
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => runApiKeyTests([idx], false)}
-                          disabled={isKeyTesting || keyObj.disabled || !keyObj.key.trim() || availableModelAliases.length === 0}
-                          className="text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 rounded p-1 disabled:opacity-50"
-                          title={keyObj.disabled ? '该 Key 已禁用' : '测试此 Key'}
-                        >
-                          <Play className="w-4 h-4" />
-                        </button>
-
                         <button onClick={() => toggleKeyDisabled(idx)} className={keyObj.disabled ? 'text-muted-foreground' : 'text-emerald-500'} title={keyObj.disabled ? "启用" : "禁用"}>
                           {keyObj.disabled ? <ToggleLeft className="w-5 h-5" /> : <ToggleRight className="w-5 h-5" />}
+                        </button>
+                        <button
+                          onClick={() => openKeyTestDialog(idx)}
+                          disabled={!keyObj.key.trim()}
+                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="测试此 Key"
+                        >
+                          <Play className="w-4 h-4" />
                         </button>
                         <button onClick={() => deleteKey(idx)} className="text-red-500 hover:text-red-400 ml-1"><Trash2 className="w-4 h-4" /></button>
                       </div>
@@ -1402,8 +1245,23 @@ export default function Channels() {
           allPlugins={allPlugins}
           enabledPlugins={formData.preferences.enabled_plugins || []}
           providerPreferences={formData.preferences || {}}
-          availableModels={availableModelAliases}
+          providerModels={getProviderModelNameListForUi()}
           onUpdate={handlePluginSheetUpdate}
+        />
+      )}
+
+      {formData && (
+        <ApiKeyTestDialog
+          open={keyTestDialogOpen}
+          onOpenChange={setKeyTestDialogOpen}
+          title={`测试 API Keys: ${formData.provider || '未命名渠道'}`}
+          engine={formData.engine || 'openai'}
+          base_url={formData.base_url || ''}
+          provider_snapshot={buildProviderSnapshotForTest()}
+          apiKeys={formData.api_keys}
+          availableModels={getProviderModelNameListForUi()}
+          initialKeyIndex={keyTestInitialIndex}
+          onDisableKeys={disableKeysInForm}
         />
       )}
 

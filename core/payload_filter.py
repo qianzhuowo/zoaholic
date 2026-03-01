@@ -4,7 +4,7 @@
 
 目标：
 - 在将请求转发到上游渠道前，按渠道能力/配置移除不被支持的字段，避免 400/422 等参数校验错误。
-- 提供可选的默认过滤（对常见 OpenAI 兼容渠道中的非标准字段做兜底移除）。
+- 提供默认过滤（对常见 OpenAI 兼容渠道中的非标准字段做兜底移除）。
 - 支持通过 provider.preferences.post_body_parameter_filter 自定义 allow/deny。
 
 配置示例（provider.preferences）：
@@ -34,7 +34,6 @@
 说明：
 - 当前实现主要过滤 payload 顶层字段；支持 dot-path（如 "stream_options.include_usage"）作为轻量扩展。
 - allow 模式会保留必要字段（如 model/messages/input/stream），并仅保留 allow + 必要字段。
-- 默认关闭：只有在 provider.preferences.post_body_parameter_filter 有配置时才会生效。
 """
 
 from __future__ import annotations
@@ -192,17 +191,11 @@ def _resolve_filter_cfg(
         return raw_cfg
 
     # 按 all/* + model_key 合并
-    # 注意：当 raw_cfg 以 {"all": {...}, "modelA": {...}} 形式存在时，我们只在命中 all/* 或当前模型键时才认为“启用”。
-    # 否则（例如配置里只有其他模型的规则），应该视为未配置，避免对不相关模型意外启用默认过滤。
     merged: dict[str, Any] = {"mode": "deny", "deny": [], "allow": [], "use_defaults": True}
-    matched_any = False
 
     def _merge_one(obj: Any) -> None:
         if not isinstance(obj, dict):
             return
-
-        nonlocal matched_any
-        matched_any = True
         if obj.get("enabled") is False:
             # 如果明确禁用，直接整块禁用
             merged["enabled"] = False
@@ -221,9 +214,6 @@ def _resolve_filter_cfg(
 
     for mk in model_keys:
         _merge_one(raw_cfg.get(mk))
-
-    if not matched_any:
-        return None
 
     return merged
 
@@ -246,18 +236,9 @@ def filter_payload_parameters(
         filtered: Dict[str, Any] = dict(payload)
 
         prefs_cfg = safe_get(provider, "preferences", "post_body_parameter_filter", default=None)
-
-        # 默认关闭：未配置时不做任何过滤。
-        # （只有在渠道显式配置 post_body_parameter_filter 时，才会启用过滤；并可通过 use_defaults 叠加内置默认过滤。）
-        if prefs_cfg is None:
-            return filtered
-
         cfg = _resolve_filter_cfg(prefs_cfg, model_keys=[x for x in (model, original_model) if x])
 
-        # 解析失败 / 未命中任何规则 => 视为未启用
-        if cfg is None:
-            return filtered
-
+        # 未配置时也应用默认过滤（仅对特定 engine 生效）
         enabled = True
         if isinstance(cfg, dict) and cfg.get("enabled") is False:
             enabled = False
