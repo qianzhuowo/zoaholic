@@ -10,7 +10,6 @@ import {
   Clock,
   Copy,
   CopyCheck,
-  Settings2,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { useAuthStore } from '../store/authStore';
@@ -47,19 +46,6 @@ export interface ApiKeyTestDialogProps {
   /** 用于把「失效 key」标记为 disabled（仅修改当前编辑中的 formData，保存后生效） */
   onDisableKeys?: (indices: number[]) => void;
 }
-
-const COMMON_FIELDS = [
-  'thinking',
-  'min_p',
-  'top_k',
-  'include_usage',
-  'stream_options.include_usage',
-  'chat_template_kwargs',
-  'response_format',
-  'tool_choice',
-  'tools',
-  'parallel_tool_calls',
-];
 
 export function ApiKeyTestDialog({
   open,
@@ -388,18 +374,24 @@ export function ApiKeyTestDialog({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-muted-foreground block mb-1">模型</label>
-                <input
-                  value={model}
-                  onChange={e => setModel(e.target.value)}
-                  placeholder={modelOptions[0] ? `例如：${modelOptions[0]}` : '例如：gpt-4o-mini'}
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
-                  list="zoa-model-options"
-                />
-                <datalist id="zoa-model-options">
-                  {modelOptions.map(m => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
+                {modelOptions.length > 0 ? (
+                  <select
+                    value={model}
+                    onChange={e => setModel(e.target.value)}
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
+                  >
+                    {modelOptions.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={model}
+                    onChange={e => setModel(e.target.value)}
+                    placeholder={'例如：gpt-4o-mini'}
+                    className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
+                  />
+                )}
               </div>
 
               <div className="flex flex-col gap-2">
@@ -430,11 +422,7 @@ export function ApiKeyTestDialog({
               </div>
             </div>
 
-            <div className="text-xs text-muted-foreground flex items-center gap-2">
-              <Settings2 className="w-3.5 h-3.5" />
-              常用字段：
-              <span className="font-mono opacity-80">{COMMON_FIELDS.join(', ')}</span>
-            </div>
+            
           </div>
 
           {/* List */}

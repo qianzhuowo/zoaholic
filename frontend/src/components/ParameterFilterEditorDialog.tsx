@@ -230,20 +230,34 @@ function RuleCard({
       <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
         <div className="flex-1">
           <label className="text-xs text-muted-foreground block mb-1">模型</label>
-          <input
-            value={rule.modelKey}
-            onChange={e => onChange({ ...rule, modelKey: e.target.value })}
-            list="zoa-filter-model-options"
-            placeholder="all / gpt-4o-mini / ..."
-            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
-            disabled={rule.modelKey === 'all'}
-            title={rule.modelKey === 'all' ? '全局规则固定为 all' : undefined}
-          />
-          <datalist id="zoa-filter-model-options">
-            {availableModels.map(m => (
-              <option key={m} value={m} />
-            ))}
-          </datalist>
+          {rule.modelKey === 'all' ? (
+            <input
+              value={rule.modelKey}
+              disabled
+              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground opacity-80"
+              title="全局规则固定为 all"
+            />
+          ) : (
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={availableModels.includes(rule.modelKey) ? rule.modelKey : ''}
+                onChange={e => onChange({ ...rule, modelKey: e.target.value })}
+                className="sm:w-64 w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
+                title="快速选择渠道中已启用的模型"
+              >
+                <option value="">(请选择模型)</option>
+                {availableModels.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <input
+                value={rule.modelKey}
+                onChange={e => onChange({ ...rule, modelKey: e.target.value })}
+                placeholder="也可手动输入自定义模型名"
+                className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono text-foreground"
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
@@ -334,11 +348,10 @@ export function ParameterFilterEditorDialog({
   }, [open]);
 
   const addModelRule = () => {
-    const defaultModel = modelOptions[0] || '';
     setModelRules(prev => {
       const next = [...prev];
       next.push({
-        modelKey: defaultModel,
+        modelKey: '',
         enabled: true,
         mode: 'deny',
         use_defaults: true,
