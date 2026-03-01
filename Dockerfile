@@ -23,8 +23,13 @@ COPY pyproject.toml uv.lock ./
 # 这里用 --no-emit-project 仅导出第三方依赖，避免在 CI/Docker 构建时报：
 #  - File '/app/README.md' cannot be found
 #  - package directory 'core' does not exist
-RUN uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt && \
-    uv pip install --system --no-cache -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --no-dev --no-hashes --no-emit-project -o requirements.txt
+
+# 说明：多架构（尤其是 linux/arm64）在 QEMU 下安装依赖可能非常慢。
+# 这里改用 pip 并关闭进度条（避免 CI 日志无法持续输出导致误判“卡住/超时”），并启用 BuildKit cache mount。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install -r requirements.txt --progress-bar off -v
 
 # ===============
 # Stage 3: Runtime
