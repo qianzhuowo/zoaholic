@@ -4,7 +4,7 @@
 
 目标：
 - 在将请求转发到上游渠道前，按渠道能力/配置移除不被支持的字段，避免 400/422 等参数校验错误。
-- 提供默认过滤（对常见 OpenAI 兼容渠道中的非标准字段做兜底移除）。
+- 提供可选的默认过滤（对常见 OpenAI 兼容渠道中的非标准字段做兜底移除）。
 - 支持通过 provider.preferences.post_body_parameter_filter 自定义 allow/deny。
 
 配置示例（provider.preferences）：
@@ -34,6 +34,7 @@
 说明：
 - 当前实现主要过滤 payload 顶层字段；支持 dot-path（如 "stream_options.include_usage"）作为轻量扩展。
 - allow 模式会保留必要字段（如 model/messages/input/stream），并仅保留 allow + 必要字段。
+- 默认关闭：只有在 provider.preferences.post_body_parameter_filter 有配置时才会生效。
 """
 
 from __future__ import annotations
@@ -46,29 +47,19 @@ from core.utils import safe_get
 
 # 对常见“OpenAI 兼容”渠道做保守兜底：移除明显的非标准字段。
 # 说明：不要在这里放太激进的默认过滤（例如 response_format），否则会破坏真实支持该字段的上游。
+_COMMON_DEFAULT_DENY: Set[str] = {
+    "thinking",  # Claude/Anthropic 风格字段
+    "include_usage",  # Zoaholic 内部字段（非 OpenAI 顶层参数）
+    "chat_template_kwargs",  # Zoaholic/内部字段
+    "min_p",  # 常见非 OpenAI 标准字段，很多兼容网关会直接报错
+    "top_k",  # 常见非 OpenAI 标准字段，很多兼容网关会直接报错
+}
+
 _DEFAULT_DENY_BY_ENGINE: dict[str, Set[str]] = {
     # OpenAI/第三方 OpenAI-Compatible
-    "openai": {
-        "thinking",  # Claude/Anthropic 风格字段
-        "include_usage",  # Zoaholic 内部字段（非 OpenAI 顶层参数）
-        "chat_template_kwargs",  # Zoaholic/内部字段
-        "min_p",  # 常见非 OpenAI 标准字段，很多兼容网关会直接报错
-        "top_k",  # 常见非 OpenAI 标准字段，很多兼容网关会直接报错
-    },
-    "openrouter": {
-        "thinking",
-        "include_usage",
-        "chat_template_kwargs",
-        "min_p",
-        "top_k",
-    },
-    "azure": {
-        "thinking",
-        "include_usage",
-        "chat_template_kwargs",
-        "min_p",
-        "top_k",
-    },
+    "openai": set(_COMMON_DEFAULT_DENY),
+    "openrouter": set(_COMMON_DEFAULT_DENY),
+    "azure": set(_COMMON_DEFAULT_DENY),
 }
 
 
@@ -93,7 +84,22 @@ def _as_set(value: Any) -> Set[str]:
     if isinstance(value, set):
         return {str(x) for x in value if str(x).strip()}
     if isinstance(value, (list, tuple)):
-        return {str(x).strip() for x in value if isinstance(x, (str, int, float)) and str(x).strip()}
+        out: Set[str] = set()
+        for x in value:
+            if isinstance(x, str):
+                s = x.strip()
+                if s:
+                    out.add(s)
+                continue
+            # 兼容 YAML/JSON 的意外类型（例如 deny: [200] 被解析为 int）
+            if isinstance(x, (int, float)):
+                logger.warning(
+                    f"[payload_filter] non-string field name in config list: {x!r} ({type(x).__name__}); treating as string"
+                )
+                s = str(x).strip()
+                if s:
+                    out.add(s)
+        return out
     if isinstance(value, str):
         s = value.strip()
         return {s} if s else set()
@@ -101,7 +107,7 @@ def _as_set(value: Any) -> Set[str]:
 
 
 def _pop_dot_path(payload: dict, path: str) -> bool:
-    """删除形如 a.b.c 的字段。返回是否成功删除。"""
+    """就地删除形如 a.b.c 的字段。返回是否成功删除。"""
     if not path or "." not in path:
         return False
 
@@ -122,6 +128,47 @@ def _pop_dot_path(payload: dict, path: str) -> bool:
         cur.pop(last, None)
         return True
     return False
+
+
+
+def _pop_dot_path_cow(payload: dict, path: str) -> tuple[dict, bool]:
+    """删除形如 a.b.c 的字段（copy-on-write）。
+
+    - 不修改入参 payload（及其路径上的 dict），返回一个新 dict。
+    - 仅复制 dot-path 所经过的 dict 节点；其他字段保持引用（避免 deepcopy 的巨大开销）。
+    """
+    if not path or "." not in path:
+        return payload, False
+
+    parts = [p for p in path.split(".") if p]
+    if not parts:
+        return payload, False
+
+    # 根节点先浅拷贝
+    dst: dict = dict(payload)
+    cur_src: Any = payload
+    cur_dst: Any = dst
+
+    for k in parts[:-1]:
+        if not isinstance(cur_src, dict):
+            return payload, False
+        if k not in cur_src:
+            return payload, False
+
+        child_src = cur_src.get(k)
+        if not isinstance(child_src, dict):
+            return payload, False
+
+        child_dst = dict(child_src)
+        cur_dst[k] = child_dst
+        cur_src = child_src
+        cur_dst = child_dst
+
+    last = parts[-1]
+    if isinstance(cur_dst, dict) and last in cur_dst:
+        cur_dst.pop(last, None)
+        return dst, True
+    return dst, False
 
 
 def _resolve_filter_cfg(
@@ -145,11 +192,17 @@ def _resolve_filter_cfg(
         return raw_cfg
 
     # 按 all/* + model_key 合并
+    # 注意：当 raw_cfg 以 {"all": {...}, "modelA": {...}} 形式存在时，我们只在命中 all/* 或当前模型键时才认为“启用”。
+    # 否则（例如配置里只有其他模型的规则），应该视为未配置，避免对不相关模型意外启用默认过滤。
     merged: dict[str, Any] = {"mode": "deny", "deny": [], "allow": [], "use_defaults": True}
+    matched_any = False
 
     def _merge_one(obj: Any) -> None:
         if not isinstance(obj, dict):
             return
+
+        nonlocal matched_any
+        matched_any = True
         if obj.get("enabled") is False:
             # 如果明确禁用，直接整块禁用
             merged["enabled"] = False
@@ -169,6 +222,9 @@ def _resolve_filter_cfg(
     for mk in model_keys:
         _merge_one(raw_cfg.get(mk))
 
+    if not matched_any:
+        return None
+
     return merged
 
 
@@ -180,22 +236,34 @@ def filter_payload_parameters(
     model: Optional[str] = None,
     original_model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """按规则过滤 payload（原地修改并返回）。"""
+    """按规则过滤 payload（返回新 dict，不修改入参）。"""
 
     try:
         if not isinstance(payload, dict) or not payload:
             return payload
 
+        # 避免在拦截器链中原地修改同一个 payload 对象导致副作用
+        filtered: Dict[str, Any] = dict(payload)
+
         prefs_cfg = safe_get(provider, "preferences", "post_body_parameter_filter", default=None)
+
+        # 默认关闭：未配置时不做任何过滤。
+        # （只有在渠道显式配置 post_body_parameter_filter 时，才会启用过滤；并可通过 use_defaults 叠加内置默认过滤。）
+        if prefs_cfg is None:
+            return filtered
+
         cfg = _resolve_filter_cfg(prefs_cfg, model_keys=[x for x in (model, original_model) if x])
 
-        # 未配置时也应用默认过滤（仅对特定 engine 生效）
+        # 解析失败 / 未命中任何规则 => 视为未启用
+        if cfg is None:
+            return filtered
+
         enabled = True
         if isinstance(cfg, dict) and cfg.get("enabled") is False:
             enabled = False
 
         if not enabled:
-            return payload
+            return filtered
 
         use_defaults = True
         mode = "deny"
@@ -215,23 +283,21 @@ def filter_payload_parameters(
         if mode == "allow":
             keep = set(_ALWAYS_KEEP_TOP_LEVEL)
             keep |= allow
-            for k in list(payload.keys()):
-                if k not in keep:
-                    payload.pop(k, None)
+            filtered = {k: filtered[k] for k in keep if k in filtered}
         else:
             # deny 模式
             for key in deny:
                 if not key:
                     continue
                 if "." in key:
-                    _pop_dot_path(payload, key)
+                    filtered, _ = _pop_dot_path_cow(filtered, key)
                 else:
                     if key in _ALWAYS_KEEP_TOP_LEVEL:
                         # 用户误配置也不允许删除必要字段
                         continue
-                    payload.pop(key, None)
+                    filtered.pop(key, None)
 
-        return payload
+        return filtered
 
     except Exception as e:
         logger.warning(f"[payload_filter] filter_payload_parameters failed: {type(e).__name__}: {e}")

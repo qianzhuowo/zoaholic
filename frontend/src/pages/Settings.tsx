@@ -408,16 +408,7 @@ export default function Settings() {
                 onChange={e => updatePreference('log_raw_data_retention_hours', parseInt(e.target.value))}
                 className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
               />
-              <p className="text-xs text-muted-foreground mt-2">设为 0 表示不保存请求/响应原始数据（大字段），减少存储占用</p>
-            </div>
-
-            <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-700 dark:text-amber-300">
-              <div className="font-medium mb-1">关于“日志保留天数”</div>
-              <ul className="list-disc pl-4 space-y-1 text-xs">
-                <li>用于控制 request_stats / channel_stats 的保留时间，过期会被自动删除（不可恢复）</li>
-                <li>与“原始数据保留时间”不同：原始数据是清空字段；日志保留天数是删除整行</li>
-                <li>你也可以选择仅手动清理（下方提供工具）</li>
-              </ul>
+              <p className="text-xs text-muted-foreground mt-2">设为 0 表示不保存请求/响应原始数据，减少存储占用</p>
             </div>
 
             <div>
@@ -440,7 +431,10 @@ export default function Settings() {
                   <input
                     type="number" min="1" max="3650"
                     value={preferences.log_retention_days ?? 30}
-                    onChange={e => updatePreference('log_retention_days', parseInt(e.target.value))}
+                    onChange={e => {
+                      const v = parseInt(e.target.value, 10);
+                      updatePreference('log_retention_days', Number.isFinite(v) ? v : 30);
+                    }}
                     className="w-40 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
                   />
                   <button type="button" onClick={() => updatePreference('log_retention_days', 7)} className="text-xs bg-muted hover:bg-muted/80 border border-border px-2 py-1 rounded">7 天</button>
@@ -453,7 +447,7 @@ export default function Settings() {
 
             {(preferences.log_retention_mode ?? 'keep') === 'auto_delete' && (
               <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">每天执行时间（按服务器时区）</label>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">每天执行时间（按服务器时区；容器环境默认可能是 UTC）</label>
                 <div className="flex items-center gap-2">
                   <input
                     type="time"
@@ -464,7 +458,8 @@ export default function Settings() {
                   <span className="text-xs text-muted-foreground">默认 03:00</span>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  如需指定时区（例如 Asia/Shanghai），可在配置中设置 <code className="px-1 rounded bg-muted">log_retention_timezone</code>
+                  若不设置时区，系统会使用服务器本地时区（在容器中通常为 UTC）。如需指定时区（例如 Asia/Shanghai），可在配置中设置{' '}
+                  <code className="px-1 rounded bg-muted">log_retention_timezone</code>
                 </p>
               </div>
             )}

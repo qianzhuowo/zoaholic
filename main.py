@@ -96,6 +96,8 @@ async def cleanup_expired_raw_data():
             first_run = False
             
             if DISABLE_DATABASE:
+                # 数据库禁用时避免空转；该任务通常不会在 DISABLE_DATABASE=True 时启动，但这里做防御。
+                await asyncio.sleep(3600)
                 continue
                 
             async with async_session_scope() as db:
@@ -162,7 +164,7 @@ async def cleanup_expired_logs(app):
     - 配置项位于 config.preferences：
       - log_retention_mode: keep | manual | auto_delete
       - log_retention_days: 正整数，保留天数
-    - mode != auto_delete 时不执行自动删除。
+    - 只有 mode == auto_delete 时才执行自动删除（显式开启，避免误删）。
     - 支持固定在每天某个时间点执行（默认 03:00，按服务器时区/可配置时区）。
     """
 
@@ -221,6 +223,8 @@ async def cleanup_expired_logs(app):
                 next_sleep_seconds = 0
 
             if DISABLE_DATABASE:
+                # 防御：数据库禁用时避免空转
+                next_sleep_seconds = 3600
                 continue
 
             # 等待配置加载完成（避免启动初期 app.state.config 尚未就绪）
@@ -236,11 +240,23 @@ async def cleanup_expired_logs(app):
             run_hour, run_minute = _parse_run_at(prefs.get("log_retention_run_at"))
             now_local = datetime.now(tz)
 
-            # 兼容：只配置了 log_retention_days（>0）时，也视为 auto_delete
-            if mode in ("", "none") and isinstance(days, (int, float)) and int(days) > 0:
-                mode = "auto_delete"
+            # 固定在每天指定时间执行。
+            # 启动/重启时如果已过今日执行时间，默认等待到下一次执行（避免在任意时间点“补跑”导致误删）。
+            # 但为了避免恰好在执行窗口附近重启导致错过当天任务，允许一个宽限窗口（默认 10 分钟）内立即执行。
+            target_today = now_local.replace(hour=run_hour, minute=run_minute, second=0, microsecond=0)
+            grace_seconds = 10 * 60
 
             if mode != "auto_delete":
+                next_sleep_seconds = _seconds_until_next_run(now_local, run_hour, run_minute)
+                continue
+
+            delta_seconds = (now_local - target_today).total_seconds()
+            if delta_seconds < 0:
+                # 还没到今天的执行时间
+                next_sleep_seconds = _seconds_until_next_run(now_local, run_hour, run_minute)
+                continue
+            if delta_seconds > grace_seconds:
+                # 已过执行时间较久：等待下一次执行（通常是明天）
                 next_sleep_seconds = _seconds_until_next_run(now_local, run_hour, run_minute)
                 continue
 
@@ -258,8 +274,14 @@ async def cleanup_expired_logs(app):
 
             # ========== D1 ==========
             if (DB_TYPE or "sqlite").lower() == "d1":
-                from db import d1_client
+                try:
+                    from db import d1_client
+                except Exception:
+                    # d1_client 不可用：等待一段时间再试
+                    next_sleep_seconds = 60
+                    continue
                 if d1_client is None:
+                    next_sleep_seconds = 60
                     continue
 
                 # 先删 request_stats，再删 channel_stats

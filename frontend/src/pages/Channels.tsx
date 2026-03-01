@@ -1,11 +1,12 @@
-import { useEffect, useState, KeyboardEvent, ClipboardEvent } from 'react';
+import { useEffect, useMemo, useState, KeyboardEvent, ClipboardEvent } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
 import {
   Plus, Edit, Brain, Trash2, ArrowRight, RefreshCw,
   Server, X, CheckCircle2, Settings2, Copy, ToggleRight, ToggleLeft,
   Folder, MemoryStick, Puzzle, Network, CopyCheck, Power, Files, Play,
-  Search, Check
+  Search, Check,
+  Loader2, XCircle, Clock
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
@@ -33,18 +34,17 @@ interface ProviderFormData {
   groups: string[];
   models: string[];
   mappings: ModelMapping[];
-  preferences: {
-    weight?: number;
-    cooldown_period?: number;
-    api_key_schedule_algorithm?: string;
-    proxy?: string;
-    tools?: boolean;
-    system_prompt?: string;
-    headers?: Record<string, string>;
-    post_body_parameter_overrides?: Record<string, any>;
-    post_body_parameter_filter?: any;
-    enabled_plugins?: string[];
-  };
+  // 注意：preferences 允许包含任意插件的 per-provider 配置。
+  // 因此这里用 Record<string, any>，避免为每个插件都在 Channels 页面硬编码字段。
+  preferences: Record<string, any>;
+}
+
+interface KeyTestResult {
+  status: 'pending' | 'testing' | 'success' | 'error';
+  latency: number | null;
+  upstream_status_code: number | null;
+  invalid: boolean;
+  error: string | null;
 }
 
 interface ChannelOption {
@@ -61,9 +61,7 @@ interface PluginOption {
   enabled: boolean;
   request_interceptors: any[];
   response_interceptors: any[];
-  metadata?: {
-    params_hint?: string;
-  };
+  metadata?: any;
 }
 
 const SCHEDULE_ALGORITHMS = [
@@ -92,67 +90,13 @@ export default function Channels() {
   const [testingProvider, setTestingProvider] = useState<any>(null);
   const [headersJson, setHeadersJson] = useState('');
   const [overridesJson, setOverridesJson] = useState('');
-  const [parameterFilterEditMode, setParameterFilterEditMode] = useState<'visual' | 'json'>('visual');
-  const [parameterFilterEnabled, setParameterFilterEnabled] = useState(true);
-  const [parameterFilterUseDefaults, setParameterFilterUseDefaults] = useState(true);
-  const [parameterFilterMode, setParameterFilterMode] = useState<'deny' | 'allow'>('deny');
-  const [parameterFilterCommonChecked, setParameterFilterCommonChecked] = useState<Record<string, boolean>>({});
-  const [parameterFilterCustomText, setParameterFilterCustomText] = useState('');
-  const [parameterFilterJson, setParameterFilterJson] = useState('');
   const [modelDisplayKey, setModelDisplayKey] = useState(0);
 
-  const COMMON_PARAMETER_FILTER_FIELDS: { key: string; label: string; hint?: string }[] = [
-    { key: 'temperature', label: 'temperature', hint: '部分渠道/模型（如部分推理模型）可能不接受 temperature' },
-    { key: 'top_p', label: 'top_p', hint: '部分渠道/模型可能不接受 top_p 或要求与 temperature 二选一' },
-    { key: 'presence_penalty', label: 'presence_penalty', hint: '部分 OpenAI 兼容实现不支持该字段' },
-    { key: 'frequency_penalty', label: 'frequency_penalty', hint: '部分 OpenAI 兼容实现不支持该字段' },
-    { key: 'thinking', label: 'thinking', hint: '部分 OpenAI 兼容网关不支持该字段（常见于 Claude Thinking 相关）' },
-    { key: 'min_p', label: 'min_p', hint: '常见扩展字段，很多兼容渠道会报 unknown field' },
-    { key: 'top_k', label: 'top_k', hint: '常见扩展字段，很多兼容渠道会报 unknown field' },
-    { key: 'include_usage', label: 'include_usage', hint: 'Zoaholic 内部字段，非 OpenAI 标准顶层参数' },
-    { key: 'chat_template_kwargs', label: 'chat_template_kwargs', hint: 'Zoaholic 内部字段，非 OpenAI 标准顶层参数' },
-    { key: 'stream_options', label: 'stream_options', hint: '部分兼容渠道不支持该对象' },
-    { key: 'stream_options.include_usage', label: 'stream_options.include_usage', hint: '以 dot-path 方式删除嵌套字段' },
-    { key: 'response_format', label: 'response_format', hint: '部分兼容渠道不支持 json_schema/json_object' },
-  ];
-
-  const parseFieldListFromText = (text: string): string[] => {
-    const lines = text
-      .split(/\r?\n/)
-      .map(s => s.trim())
-      .filter(Boolean);
-    // 允许逗号分隔
-    const parts = lines.flatMap(line => line.split(',').map(x => x.trim()).filter(Boolean));
-    return Array.from(new Set(parts));
-  };
-
-  const buildVisualParameterFilterConfig = () => {
-    if (!parameterFilterEnabled) return { enabled: false };
-
-    const checkedCommon = Object.entries(parameterFilterCommonChecked)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-    const custom = parseFieldListFromText(parameterFilterCustomText);
-    const fields = Array.from(new Set([...checkedCommon, ...custom]));
-
-    const base: any = {
-      mode: parameterFilterMode,
-      use_defaults: parameterFilterUseDefaults,
-    };
-
-    if (parameterFilterMode === 'allow') base.allow = fields;
-    else base.deny = fields;
-
-    return base;
-  };
-
-  const safeStringify = (v: any) => {
-    try {
-      return JSON.stringify(v, null, 2);
-    } catch {
-      return '';
-    }
-  };
+  // API Key 测试
+  const [keyTestModel, setKeyTestModel] = useState('');
+  const [keyTestConcurrency, setKeyTestConcurrency] = useState(3);
+  const [keyTestResults, setKeyTestResults] = useState<Map<number, KeyTestResult>>(new Map());
+  const [isKeyTesting, setIsKeyTesting] = useState(false);
 
   const [isFetchModelsOpen, setIsFetchModelsOpen] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -160,6 +104,27 @@ export default function Channels() {
   const [modelSearchQuery, setModelSearchQuery] = useState('');
 
   const { token } = useAuthStore();
+
+  const availableModelAliases = useMemo(() => {
+    if (!formData) return [] as string[];
+    const aliases = [
+      ...(formData.models || []),
+      ...((formData.mappings || []).map(m => m.from).filter(Boolean)),
+    ];
+    return Array.from(new Set(aliases.map(s => String(s).trim()).filter(Boolean))).sort();
+  }, [formData]);
+
+  // 打开编辑弹窗 / 切换渠道时：重置 Key 测试状态
+  useEffect(() => {
+    if (!isModalOpen) return;
+    setKeyTestResults(new Map());
+    setIsKeyTesting(false);
+    setKeyTestConcurrency(3);
+    setKeyTestModel(prev => {
+      if (prev && availableModelAliases.includes(prev)) return prev;
+      return availableModelAliases[0] || '';
+    });
+  }, [isModalOpen, availableModelAliases]);
 
   const fetchInitialData = async () => {
     try {
@@ -241,63 +206,9 @@ export default function Channels() {
       setHeadersJson(Object.keys(pHeaders).length > 0 ? JSON.stringify(pHeaders, null, 2) : '');
       setOverridesJson(Object.keys(pOverrides).length > 0 ? JSON.stringify(pOverrides, null, 2) : '');
 
-      // 参数过滤：尽量解析为可视化配置；复杂结构则默认进入 JSON 模式
-      const rawFilter = provider.preferences?.post_body_parameter_filter;
-      setParameterFilterJson(rawFilter ? safeStringify(rawFilter) : '');
-      setParameterFilterEditMode('visual');
-      setParameterFilterEnabled(true);
-      setParameterFilterUseDefaults(true);
-      setParameterFilterMode('deny');
-      setParameterFilterCommonChecked({});
-      setParameterFilterCustomText('');
-
-      try {
-        // list => deny
-        if (Array.isArray(rawFilter)) {
-          const denyList = rawFilter.map((x: any) => String(x).trim()).filter(Boolean);
-          const commonSet = new Set(COMMON_PARAMETER_FILTER_FIELDS.map(x => x.key));
-          const commonChecked: Record<string, boolean> = {};
-          const custom: string[] = [];
-          denyList.forEach(k => {
-            if (commonSet.has(k)) commonChecked[k] = true;
-            else custom.push(k);
-          });
-          setParameterFilterCommonChecked(commonChecked);
-          setParameterFilterCustomText(custom.join('\n'));
-        } else if (rawFilter && typeof rawFilter === 'object') {
-          // 简单结构化配置
-          if (
-            'mode' in rawFilter || 'deny' in rawFilter || 'allow' in rawFilter ||
-            'use_defaults' in rawFilter || 'enabled' in rawFilter
-          ) {
-            if (rawFilter.enabled === false) {
-              setParameterFilterEnabled(false);
-            }
-            if (typeof rawFilter.use_defaults === 'boolean') setParameterFilterUseDefaults(rawFilter.use_defaults);
-            if (rawFilter.mode === 'allow') setParameterFilterMode('allow');
-            else if (rawFilter.mode === 'deny') setParameterFilterMode('deny');
-
-            const list = (rawFilter.mode === 'allow' ? rawFilter.allow : rawFilter.deny) || [];
-            const fields = Array.isArray(list) ? list.map((x: any) => String(x).trim()).filter(Boolean) : [];
-
-            const commonSet = new Set(COMMON_PARAMETER_FILTER_FIELDS.map(x => x.key));
-            const commonChecked: Record<string, boolean> = {};
-            const custom: string[] = [];
-            fields.forEach(k => {
-              if (commonSet.has(k)) commonChecked[k] = true;
-              else custom.push(k);
-            });
-            setParameterFilterCommonChecked(commonChecked);
-            setParameterFilterCustomText(custom.join('\n'));
-          } else {
-            // all/*/model_key 这种复杂结构，交给 JSON
-            if (rawFilter) setParameterFilterEditMode('json');
-          }
-        }
-      } catch {
-        // 解析失败直接交给 JSON
-        if (rawFilter) setParameterFilterEditMode('json');
-      }
+      const basePreferences = provider.preferences && typeof provider.preferences === 'object'
+        ? provider.preferences
+        : {};
 
       setFormData({
         provider: provider.provider || provider.name || '',
@@ -310,25 +221,19 @@ export default function Channels() {
         models,
         mappings,
         preferences: {
-          weight: provider.preferences?.weight ?? provider.weight ?? 10,
-          cooldown_period: provider.preferences?.cooldown_period ?? 300,
-          api_key_schedule_algorithm: provider.preferences?.api_key_schedule_algorithm || 'round_robin',
-          proxy: provider.preferences?.proxy || '',
-          tools: provider.preferences?.tools !== false,
-          system_prompt: provider.preferences?.system_prompt || '',
-          enabled_plugins: provider.preferences?.enabled_plugins || [],
-        }
+          ...basePreferences,
+          weight: basePreferences.weight ?? provider.weight ?? 10,
+          cooldown_period: basePreferences.cooldown_period ?? 300,
+          api_key_schedule_algorithm: basePreferences.api_key_schedule_algorithm || 'round_robin',
+          proxy: basePreferences.proxy || '',
+          tools: basePreferences.tools !== false,
+          system_prompt: basePreferences.system_prompt || '',
+          enabled_plugins: Array.isArray(basePreferences.enabled_plugins) ? basePreferences.enabled_plugins : [],
+        },
       });
     } else {
       setHeadersJson('');
       setOverridesJson('');
-      setParameterFilterEditMode('visual');
-      setParameterFilterEnabled(true);
-      setParameterFilterUseDefaults(true);
-      setParameterFilterMode('deny');
-      setParameterFilterCommonChecked({});
-      setParameterFilterCustomText('');
-      setParameterFilterJson('');
       setFormData({
         provider: '',
         engine: channelTypes.length > 0 ? channelTypes[0].id : '',
@@ -405,6 +310,143 @@ export default function Channels() {
     if (formData.api_keys.length === 0) return;
     if (!confirm('确定要清空该渠道的全部密钥吗？此操作仅影响当前编辑中的渠道配置，保存后才会生效。')) return;
     updateFormData('api_keys', []);
+  };
+
+  const buildProviderSnapshotForTest = () => {
+    if (!formData) return null;
+
+    let headersObj: any = undefined;
+    let overridesObj: any = undefined;
+    try {
+      if (headersJson.trim()) headersObj = JSON.parse(headersJson);
+      if (overridesJson.trim()) overridesObj = JSON.parse(overridesJson);
+    } catch (e) {
+      alert('高级配置 JSON 格式错误（headers / overrides）');
+      return null;
+    }
+
+    const serializedKeys = formData.api_keys
+      .map(k => k.disabled ? `!${k.key.trim()}` : k.key.trim())
+      .filter(Boolean);
+    const finalApi = serializedKeys.length === 0 ? '' : serializedKeys.length === 1 ? serializedKeys[0] : serializedKeys;
+
+    const finalModels: any[] = [...(formData.models || [])];
+    (formData.mappings || []).forEach(m => {
+      if (m.from && m.to) finalModels.push({ [m.to]: m.from });
+    });
+
+    return {
+      provider: formData.provider,
+      base_url: formData.base_url,
+      model_prefix: formData.model_prefix || undefined,
+      api: finalApi,
+      model: finalModels,
+      engine: formData.engine || undefined,
+      enabled: formData.enabled,
+      groups: formData.groups,
+      preferences: {
+        ...(formData.preferences || {}),
+        headers: headersObj,
+        post_body_parameter_overrides: overridesObj,
+      },
+    };
+  };
+
+  const getKeyTestStatusIcon = (r?: KeyTestResult) => {
+    if (!r) return <Clock className="w-4 h-4 text-muted-foreground" />;
+    if (r.status === 'testing') return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
+    if (r.status === 'success') return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
+    if (r.status === 'error') return <XCircle className="w-4 h-4 text-red-500" />;
+    return <Clock className="w-4 h-4 text-muted-foreground" />;
+  };
+
+  const runApiKeyTests = async (indices: number[], autoDisableInvalid: boolean) => {
+    if (!formData) return;
+    if (!keyTestModel) {
+      alert('请先选择用于测试的模型');
+      return;
+    }
+
+    const providerSnapshot = buildProviderSnapshotForTest();
+    if (!providerSnapshot) return;
+
+    const targets = indices
+      .map(i => ({ index: i, key: formData.api_keys[i]?.key?.trim() || '', disabled: formData.api_keys[i]?.disabled }))
+      .filter(x => x.key && !x.disabled);
+
+    if (targets.length === 0) {
+      alert('没有可测试的启用 Key');
+      return;
+    }
+
+    setIsKeyTesting(true);
+    setKeyTestResults(prev => {
+      const next = new Map(prev);
+      targets.forEach(t => {
+        next.set(t.index, { status: 'testing', latency: null, upstream_status_code: null, invalid: false, error: null });
+      });
+      return next;
+    });
+
+    try {
+      const res = await apiFetch('/v1/channels/test_api_keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          provider_snapshot: providerSnapshot,
+          engine: providerSnapshot.engine || formData.engine || 'openai',
+          base_url: providerSnapshot.base_url,
+          model: keyTestModel,
+          timeout: 30,
+          concurrency: keyTestConcurrency,
+          api_keys: targets.map(t => ({ index: t.index, key: t.key })),
+        }),
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok || !data?.success) {
+        alert(`测试失败：${data?.detail || data?.error || data?.message || res.status}`);
+        return;
+      }
+
+      const results: any[] = Array.isArray(data?.results) ? data.results : [];
+
+      setKeyTestResults(prev => {
+        const next = new Map(prev);
+        results.forEach((r: any) => {
+          const idx = typeof r?.index === 'number' ? r.index : null;
+          if (idx === null) return;
+          const success = Boolean(r?.success);
+          const invalid = Boolean(r?.is_invalid_api_key);
+          next.set(idx, {
+            status: success ? 'success' : 'error',
+            latency: typeof r?.latency_ms === 'number' ? r.latency_ms : null,
+            upstream_status_code: typeof r?.upstream_status_code === 'number' ? r.upstream_status_code : null,
+            invalid,
+            error: r?.error || null,
+          });
+        });
+        return next;
+      });
+
+      if (autoDisableInvalid) {
+        const invalidIdx = results
+          .filter(r => r?.is_invalid_api_key)
+          .map(r => r?.index)
+          .filter((x: any) => typeof x === 'number');
+
+        if (invalidIdx.length > 0) {
+          updateFormData('api_keys', formData.api_keys.map((k, i) => invalidIdx.includes(i) ? { ...k, disabled: true } : k));
+          alert(`已测试 ${targets.length} 个 Key，自动禁用 ${invalidIdx.length} 个疑似失效 Key（记得点击保存生效）`);
+        } else {
+          alert(`已测试 ${targets.length} 个 Key，未发现失效 Key`);
+        }
+      }
+    } catch (e: any) {
+      alert(`测试失败：${e?.message || '网络错误'}`);
+    } finally {
+      setIsKeyTesting(false);
+    }
   };
 
   const handleGroupInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -561,8 +603,19 @@ export default function Channels() {
     setModelDisplayKey(prev => prev + 1);
   };
 
-  const handlePluginSheetUpdate = (newPlugins: string[]) => {
-    updatePreference('enabled_plugins', newPlugins);
+  const handlePluginSheetUpdate = (payload: { enabled_plugins: string[]; preferences_patch: Record<string, any>; preferences_delete: string[] }) => {
+    setFormData(prev => {
+      if (!prev) return prev;
+      const nextPrefs: Record<string, any> = { ...(prev.preferences || {}) };
+      nextPrefs.enabled_plugins = payload.enabled_plugins;
+      for (const [k, v] of Object.entries(payload.preferences_patch || {})) {
+        nextPrefs[k] = v;
+      }
+      for (const k of payload.preferences_delete || []) {
+        delete nextPrefs[k];
+      }
+      return { ...prev, preferences: nextPrefs };
+    });
   };
 
   const handleDeleteProvider = async (idx: number) => {
@@ -677,23 +730,6 @@ export default function Channels() {
       return;
     }
 
-    // 参数过滤配置
-    let parameterFilterObj: any = undefined;
-    if (parameterFilterEditMode === 'json') {
-      if (parameterFilterJson.trim()) {
-        try {
-          parameterFilterObj = JSON.parse(parameterFilterJson);
-        } catch (e: any) {
-          alert(`参数过滤 JSON 格式错误: ${e?.message || 'invalid json'}`);
-          return;
-        }
-      } else {
-        parameterFilterObj = undefined;
-      }
-    } else {
-      parameterFilterObj = buildVisualParameterFilterConfig();
-    }
-
     const targetProvider: any = {
       provider: formData.provider,
       base_url: formData.base_url,
@@ -707,7 +743,6 @@ export default function Channels() {
         ...formData.preferences,
         headers: headersObj,
         post_body_parameter_overrides: overridesObj,
-        post_body_parameter_filter: parameterFilterObj,
       },
     };
 
@@ -1007,6 +1042,57 @@ export default function Channels() {
                       <button onClick={addEmptyKey} className="text-primary hover:text-primary/80 flex items-center gap-1"><Plus className="w-3 h-3" /> 添加密钥</button>
                     </div>
                   </div>
+
+                  {/* Key 测试工具栏 */}
+                  <div className="flex flex-wrap items-center gap-2 mb-2 text-xs">
+                    <span className="text-muted-foreground">测试模型:</span>
+                    <select
+                      value={keyTestModel}
+                      onChange={(e) => setKeyTestModel(e.target.value)}
+                      className="bg-background border border-border rounded px-2 py-1 font-mono text-foreground"
+                      disabled={availableModelAliases.length === 0}
+                      title={availableModelAliases.length === 0 ? '请先配置模型' : '选择用于测试的模型'}
+                    >
+                      {availableModelAliases.length === 0 ? (
+                        <option value="">（未配置模型）</option>
+                      ) : (
+                        availableModelAliases.map(m => (
+                          <option key={m} value={m}>{m}</option>
+                        ))
+                      )}
+                    </select>
+
+                    <span className="text-muted-foreground">并发:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={keyTestConcurrency}
+                      onChange={(e) => setKeyTestConcurrency(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+                      className="w-14 bg-background border border-border rounded px-2 py-1 text-center font-mono text-foreground"
+                    />
+
+                    <button
+                      type="button"
+                      disabled={isKeyTesting || availableModelAliases.length === 0}
+                      onClick={() => runApiKeyTests(formData.api_keys.map((_, i) => i), false)}
+                      className="px-2 py-1 rounded bg-primary/10 text-primary hover:bg-primary/15 disabled:opacity-50 flex items-center gap-1"
+                      title="一键测试该渠道中所有启用的 Key"
+                    >
+                      <Play className="w-3 h-3" /> 测试全部 Key
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isKeyTesting || availableModelAliases.length === 0}
+                      onClick={() => runApiKeyTests(formData.api_keys.map((_, i) => i), true)}
+                      className="px-2 py-1 rounded bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/15 disabled:opacity-50 flex items-center gap-1"
+                      title="测试全部 Key，并自动禁用疑似失效 Key（需要保存后生效）"
+                    >
+                      <XCircle className="w-3 h-3" /> 测试并禁用失效
+                    </button>
+                  </div>
+
                   <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                     {formData.api_keys.map((keyObj, idx) => (
                       <div key={idx} className={`flex items-center gap-2 px-3 py-2 rounded-lg border ${keyObj.disabled ? 'bg-muted/30 border-border opacity-60' : 'bg-muted/50 border-border'}`}>
@@ -1019,6 +1105,30 @@ export default function Channels() {
                           placeholder="sk-..."
                           className={`flex-1 bg-transparent border-none text-sm font-mono outline-none min-w-0 ${keyObj.disabled ? 'text-muted-foreground line-through' : 'text-foreground'}`}
                         />
+
+                        <div
+                          className="w-5 h-5 flex items-center justify-center"
+                          title={(() => {
+                            const r = keyTestResults.get(idx);
+                            if (!r) return '未测试';
+                            if (r.status === 'testing') return '正在测试...';
+                            if (r.status === 'success') return `成功 ${r.latency ?? '-'}ms`; 
+                            return `${r.invalid ? '疑似失效' : '失败'}: ${r.error || ''}`;
+                          })()}
+                        >
+                          {getKeyTestStatusIcon(keyTestResults.get(idx))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => runApiKeyTests([idx], false)}
+                          disabled={isKeyTesting || keyObj.disabled || !keyObj.key.trim() || availableModelAliases.length === 0}
+                          className="text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 rounded p-1 disabled:opacity-50"
+                          title={keyObj.disabled ? '该 Key 已禁用' : '测试此 Key'}
+                        >
+                          <Play className="w-4 h-4" />
+                        </button>
+
                         <button onClick={() => toggleKeyDisabled(idx)} className={keyObj.disabled ? 'text-muted-foreground' : 'text-emerald-500'} title={keyObj.disabled ? "启用" : "禁用"}>
                           {keyObj.disabled ? <ToggleLeft className="w-5 h-5" /> : <ToggleRight className="w-5 h-5" />}
                         </button>
@@ -1135,7 +1245,7 @@ export default function Channels() {
                           {(!formData.preferences.enabled_plugins || formData.preferences.enabled_plugins.length === 0) ? (
                             <span className="text-sm text-muted-foreground italic">未启用任何插件</span>
                           ) : (
-                            formData.preferences.enabled_plugins.map((p, idx) => {
+                            (formData.preferences.enabled_plugins as string[]).map((p: string, idx: number) => {
                               const [name, opts] = p.split(':');
                               return (
                                 <span key={idx} className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-500 px-2 py-1 rounded text-xs font-mono flex items-center gap-1">
@@ -1183,140 +1293,6 @@ export default function Channels() {
                         className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm font-mono focus:border-primary outline-none text-foreground"
                       />
                       <p className="text-xs text-muted-foreground mt-1">失焦时自动格式化</p>
-                    </div>
-
-                    {/* 请求体参数过滤 */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-sm font-medium text-foreground">请求体参数过滤</label>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-muted-foreground">启用</span>
-                          <Switch.Root
-                            checked={parameterFilterEnabled}
-                            onCheckedChange={setParameterFilterEnabled}
-                            className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary"
-                          >
-                            <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform data-[state=checked]:translate-x-[22px] translate-x-0.5" />
-                          </Switch.Root>
-                        </div>
-                      </div>
-                      <p className="text-xs text-muted-foreground mb-3">
-                        用于移除上游渠道不支持的请求体字段，避免出现 unknown field / validation error。
-                      </p>
-
-                      {/* 编辑模式切换 */}
-                      <div className="flex items-center gap-2 mb-3">
-                        <button
-                          type="button"
-                          onClick={() => setParameterFilterEditMode('visual')}
-                          className={`text-xs px-2 py-1 rounded border ${parameterFilterEditMode === 'visual' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-foreground border-border hover:bg-muted'}`}
-                        >
-                          可视化
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            // 进入 JSON 模式时，自动填充当前可视化配置
-                            setParameterFilterJson(safeStringify(buildVisualParameterFilterConfig()));
-                            setParameterFilterEditMode('json');
-                          }}
-                          className={`text-xs px-2 py-1 rounded border ${parameterFilterEditMode === 'json' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background text-foreground border-border hover:bg-muted'}`}
-                        >
-                          JSON
-                        </button>
-                        <span className="text-xs text-muted-foreground">（复杂规则建议用 JSON）</span>
-                      </div>
-
-                      {parameterFilterEditMode === 'json' ? (
-                        <>
-                          <textarea
-                            value={parameterFilterJson}
-                            onChange={e => setParameterFilterJson(e.target.value)}
-                            onBlur={() => formatJsonOnBlur(parameterFilterJson, setParameterFilterJson, '参数过滤')}
-                            rows={6}
-                            placeholder='{"mode":"deny","use_defaults":true,"deny":["thinking","min_p"]}'
-                            className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm font-mono focus:border-primary outline-none text-foreground"
-                          />
-                          <p className="text-xs text-muted-foreground mt-1">失焦时自动格式化</p>
-                        </>
-                      ) : (
-                        <div className="space-y-3">
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div>
-                              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">过滤模式</label>
-                              <select
-                                value={parameterFilterMode}
-                                onChange={e => setParameterFilterMode(e.target.value === 'allow' ? 'allow' : 'deny')}
-                                className="mt-1 w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
-                                disabled={!parameterFilterEnabled}
-                              >
-                                <option value="deny">黑名单 (deny) - 移除不支持字段（推荐）</option>
-                                <option value="allow">白名单 (allow) - 只保留允许字段</option>
-                              </select>
-                            </div>
-
-                            <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg border border-border mt-5 sm:mt-0">
-                              <div>
-                                <div className="text-sm text-foreground">使用默认过滤规则</div>
-                                <div className="text-xs text-muted-foreground">内置针对常见兼容渠道的保守兜底过滤</div>
-                              </div>
-                              <Switch.Root
-                                checked={parameterFilterUseDefaults}
-                                onCheckedChange={setParameterFilterUseDefaults}
-                                disabled={!parameterFilterEnabled}
-                                className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary"
-                              >
-                                <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform data-[state=checked]:translate-x-[22px] translate-x-0.5" />
-                              </Switch.Root>
-                            </div>
-                          </div>
-
-                          <div className="bg-muted/30 border border-border rounded-lg p-3">
-                            <div className="text-xs text-muted-foreground mb-2">常用字段（勾选即可加入规则）</div>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                              {COMMON_PARAMETER_FILTER_FIELDS.map(item => (
-                                <label key={item.key} className="flex items-start gap-2 text-sm text-foreground">
-                                  <input
-                                    type="checkbox"
-                                    className="mt-0.5"
-                                    checked={!!parameterFilterCommonChecked[item.key]}
-                                    disabled={!parameterFilterEnabled}
-                                    onChange={() => {
-                                      setParameterFilterCommonChecked(prev => ({
-                                        ...prev,
-                                        [item.key]: !prev?.[item.key],
-                                      }));
-                                    }}
-                                  />
-                                  <div className="min-w-0">
-                                    <div className="font-mono text-xs">{item.label}</div>
-                                    {item.hint && <div className="text-xs text-muted-foreground">{item.hint}</div>}
-                                  </div>
-                                </label>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="text-sm font-medium text-foreground mb-1.5 block">自定义字段（每行一个；支持 dot-path）</label>
-                            <textarea
-                              value={parameterFilterCustomText}
-                              onChange={e => setParameterFilterCustomText(e.target.value)}
-                              rows={4}
-                              placeholder={"例如：\nreasoning_effort\nservice_tier\nstream_options.include_usage"}
-                              disabled={!parameterFilterEnabled}
-                              className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm font-mono focus:border-primary outline-none text-foreground disabled:opacity-60"
-                            />
-                          </div>
-
-                          <div>
-                            <label className="text-xs text-muted-foreground uppercase tracking-wider">预览（保存后会写入 preferences.post_body_parameter_filter）</label>
-                            <pre className="mt-1 text-xs bg-background border border-border rounded-lg p-3 overflow-auto max-h-[240px]">
-                              {safeStringify(buildVisualParameterFilterConfig()) || ''}
-                            </pre>
-                          </div>
-                        </div>
-                      )}
                     </div>
 
                     <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg border border-border">
@@ -1425,6 +1401,8 @@ export default function Channels() {
           onOpenChange={setShowPluginSheet}
           allPlugins={allPlugins}
           enabledPlugins={formData.preferences.enabled_plugins || []}
+          providerPreferences={formData.preferences || {}}
+          availableModels={availableModelAliases}
           onUpdate={handlePluginSheetUpdate}
         />
       )}
