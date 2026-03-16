@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
 from core.error_response import openai_error_response
+from core.auth_errors import AUTH_API_KEY_INVALID, auth_http_exception
 from .registry import get_dialect, list_dialects, EndpointDefinition
 
 if TYPE_CHECKING:
@@ -70,8 +71,7 @@ def _create_dialect_verify_api_key(dialect_id: str):
             token = await _extract_token(request, credentials)
 
         if not token:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="Invalid or missing API Key")
+            raise auth_http_exception(AUTH_API_KEY_INVALID)
 
         api_index: int | None = None
         token_for_stats = token
@@ -97,8 +97,7 @@ def _create_dialect_verify_api_key(dialect_id: str):
                 api_index = None
 
         if api_index is None:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="Invalid or missing API Key")
+            raise auth_http_exception(AUTH_API_KEY_INVALID)
 
         # 更新 request_info 中的 API key 信息，确保统计记录正确的 key
         try:

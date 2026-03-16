@@ -20,6 +20,11 @@ from ..utils import (
     end_of_line,
     upload_image_to_0x0st,
 )
+from ..file_utils import (
+    normalize_file_ref,
+    raise_fileref_unsupported_error,
+    require_text_file_content,
+)
 from ..response import check_response
 
 
@@ -148,6 +153,35 @@ async def patch_passthrough_openai_payload(
     return payload
 
 
+async def format_file_message(file_ref, *, responses_mode: bool) -> dict:
+    """格式化 FileRef 为 OpenAI/Responses 所需格式。"""
+    file_id = getattr(file_ref, "file_id", None)
+    if responses_mode and file_id:
+        payload = {"type": "input_file", "file_id": file_id}
+        if getattr(file_ref, "filename", None):
+            payload["filename"] = file_ref.filename
+        return payload
+
+    normalized = await normalize_file_ref(file_ref)
+    if normalized.file_id:
+        raise_fileref_unsupported_error("OpenAI Chat Completions", normalized.mime_type, "图片、纯文本附件；若需 file_id / PDF / 二进制文件请改用 Responses API")
+
+    if normalized.is_image:
+        if responses_mode:
+            return {"type": "input_image", "image_url": normalized.data_url}
+        return {"type": "image_url", "image_url": {"url": normalized.data_url}}
+
+    if responses_mode:
+        return {
+            "type": "input_file",
+            "filename": normalized.filename or "attachment",
+            "file_data": normalized.data_url,
+        }
+
+    text_content = require_text_file_content(normalized, "OpenAI Chat Completions", "图片、纯文本附件；若需 PDF/二进制文件请改用 Responses API、Claude 或 Gemini")
+    return format_text_message(normalized.render_text_attachment() or text_content)
+
+
 async def get_gpt_payload(request, engine, provider, api_key=None):
     """构建 OpenAI 兼容 API 的请求 payload"""
     headers = {
@@ -167,6 +201,7 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
         headers['HTTP-Referer'] = "https://github.com/HCPTangHY/Zoaholic"
         headers['X-Title'] = "Zoaholic"
 
+    responses_mode = "v1/responses" in url
     messages = []
     for msg in request.messages:
         tool_calls = None
@@ -176,17 +211,19 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
             for item in msg.content:
                 if item.type == "text":
                     text_message = format_text_message(item.text)
-                    if "v1/responses" in url:
+                    if responses_mode:
                         text_message["type"] = "input_text"
                     content.append(text_message)
                 elif item.type == "image_url" and provider.get("image", True) and "o1-mini" not in original_model:
                     image_message = await format_image_message(item.image_url.url)
-                    if "v1/responses" in url:
+                    if responses_mode:
                         image_message = {
                             "type": "input_image",
                             "image_url": image_message["image_url"]["url"]
                         }
                     content.append(image_message)
+                elif item.type == "file" and getattr(item, "file", None):
+                    content.append(await format_file_message(item.file, responses_mode=responses_mode))
         else:
             content = msg.content
             if msg.role == "system" and "o3-mini" in original_model and not content.startswith("Formatting re-enabled"):
@@ -221,7 +258,7 @@ async def get_gpt_payload(request, engine, provider, api_key=None):
         system_msg = messages.pop(0)
         messages[0]["content"] = system_msg["content"] + messages[0]["content"]
 
-    if "v1/responses" in url:
+    if responses_mode:
         payload = {
             "model": original_model,
             "input": messages,

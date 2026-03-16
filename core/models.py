@@ -1,5 +1,5 @@
 from io import IOBase
-from pydantic import BaseModel, Field, model_validator, ConfigDict
+from pydantic import BaseModel, Field, model_validator, ConfigDict, AliasChoices
 from typing import List, Dict, Optional, Union, Tuple, Literal, Any
 
 class FunctionParameter(BaseModel):
@@ -41,6 +41,32 @@ class ToolCall(BaseModel):
 
     model_config = ConfigDict(extra='allow')
 
+class FileRef(BaseModel):
+    url: Optional[str] = None
+    data: Optional[str] = None
+    mime_type: Optional[str] = Field(default=None, validation_alias=AliasChoices("mime_type", "mimeType"))
+    filename: Optional[str] = Field(default=None, validation_alias=AliasChoices("filename", "file_name", "name"))
+    file_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("file_id", "fileId"))
+
+    model_config = ConfigDict(extra='allow')
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_alias_fields(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            if values.get("data") and not values.get("url"):
+                values["url"] = values["data"]
+            if values.get("mimeType") and not values.get("mime_type"):
+                values["mime_type"] = values.get("mimeType")
+            if values.get("file_name") and not values.get("filename"):
+                values["filename"] = values.get("file_name")
+            if values.get("name") and not values.get("filename"):
+                values["filename"] = values.get("name")
+            if values.get("fileId") and not values.get("file_id"):
+                values["file_id"] = values.get("fileId")
+        return values
+
 class ImageUrl(BaseModel):
     url: str
 
@@ -48,6 +74,7 @@ class ContentItem(BaseModel):
     type: str
     text: Optional[str] = None
     image_url: Optional[ImageUrl] = None
+    file: Optional[FileRef] = Field(default=None, validation_alias=AliasChoices("file", "file_ref", "fileRef"))
     
     model_config = ConfigDict(extra='allow')
 

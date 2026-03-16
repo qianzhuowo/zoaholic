@@ -25,6 +25,11 @@ from ..utils import (
     generate_sse_response,
     end_of_line,
 )
+from ..file_utils import (
+    normalize_file_ref,
+    require_text_file_content,
+    raise_fileref_unsupported_error,
+)
 from ..response import check_response
 
 
@@ -44,6 +49,31 @@ async def format_input_image(image_url: str) -> dict:
     return {
         "type": "input_image",
         "image_url": base64_image,
+    }
+
+
+async def format_input_file(file_ref) -> dict:
+    """格式化 FileRef 为 Responses API 输入。"""
+    normalized = await normalize_file_ref(file_ref)
+    if normalized.file_id:
+        payload = {"type": "input_file", "file_id": normalized.file_id}
+        if normalized.filename:
+            payload["filename"] = normalized.filename
+        return payload
+
+    if not normalized.is_resolved or not normalized.data_url:
+        raise_fileref_unsupported_error("OpenAI Responses", normalized.mime_type, "图片、文本、PDF 等可解析附件或 file_id")
+
+    if normalized.is_image:
+        return {
+            "type": "input_image",
+            "image_url": normalized.data_url,
+        }
+
+    return {
+        "type": "input_file",
+        "filename": normalized.filename or "attachment",
+        "file_data": normalized.data_url,
     }
 
 
@@ -275,6 +305,17 @@ async def get_responses_payload(request, engine, provider, api_key=None):
                 elif getattr(item, "type", None) == "image_url" and provider.get("image", True):
                     image_item = await format_input_image(item.image_url.url)
                     content_items.append(image_item)
+                elif getattr(item, "type", None) == "file":
+                    file_ref = getattr(item, "file", None)
+                    if file_ref:
+                        normalized_file = await normalize_file_ref(file_ref)
+                        if normalized_file.file_id:
+                            content_items.append(await format_input_file(file_ref))
+                        else:
+                            if normalized_file.is_text and not normalized_file.is_image:
+                                content_items.append(format_input_text(normalized_file.render_text_attachment() or require_text_file_content(normalized_file, "OpenAI Responses", "图片、文本、PDF 等可解析附件或 file_id")))
+                            else:
+                                content_items.append(await format_input_file(file_ref))
             if content_items:
                 input_items.append({"type": "message", "role": role, "content": content_items})
 

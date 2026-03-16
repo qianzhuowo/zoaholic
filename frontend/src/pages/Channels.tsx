@@ -12,6 +12,8 @@ import * as Switch from '@radix-ui/react-switch';
 import { InterceptorSheet } from '../components/InterceptorSheet';
 import { ChannelTestDialog } from '../components/ChannelTestDialog';
 import { ApiKeyTestDialog } from '../components/ApiKeyTestDialog';
+import { RateLimitEditor } from '../components/RateLimitEditor';
+import { summarizeRateLimitConfig } from '../lib/rateLimit';
 
 // ========== Types ==========
 interface ApiKeyObj {
@@ -684,6 +686,7 @@ export default function Channels() {
     const isEnabled = p.enabled !== false;
     const groups = Array.isArray(p.groups) ? p.groups : p.group ? [p.group] : ['default'];
     const plugins = p.preferences?.enabled_plugins || [];
+    const rateLimitSummary = summarizeRateLimitConfig(p.preferences?.rate_limit);
     const weight = p.preferences?.weight ?? p.weight ?? 0;
 
     return (
@@ -710,6 +713,9 @@ export default function Channels() {
             <span className="bg-primary/10 text-primary px-2 py-0.5 rounded text-xs flex items-center gap-1"><Puzzle className="w-3 h-3" /> {plugins.length}</span>
           )}
         </div>
+
+        <div className="text-xs text-muted-foreground mb-3 truncate" title={rateLimitSummary}>Rate Limit: {rateLimitSummary}</div>
+
 
         <div className="flex items-center justify-between pt-3 border-t border-border gap-2">
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -790,6 +796,7 @@ export default function Channels() {
                 const isEnabled = p.enabled !== false;
                 const groups = Array.isArray(p.groups) ? p.groups : p.group ? [p.group] : ['default'];
                 const plugins = p.preferences?.enabled_plugins || [];
+                const rateLimitSummary = summarizeRateLimitConfig(p.preferences?.rate_limit);
                 const weight = p.preferences?.weight ?? p.weight ?? 0;
 
                 return (
@@ -808,6 +815,7 @@ export default function Channels() {
                           ))}
                           {groups.length > 2 && <span className="text-xs text-muted-foreground">+{groups.length - 2}</span>}
                         </div>
+                        <span className="text-[11px] text-muted-foreground truncate" title={rateLimitSummary}>Rate Limit: {rateLimitSummary}</span>
                         <span className="text-xs text-muted-foreground font-mono">{p.engine || 'openai'}</span>
                       </div>
                     </td>
@@ -1054,7 +1062,7 @@ export default function Channels() {
                   <div className="flex items-center gap-2 text-sm font-semibold text-foreground mb-4 border-b border-border pb-2">
                     <Network className="w-4 h-4 text-yellow-500" /> 路由与限流
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
                     <div>
                       <label className="text-sm font-medium text-foreground mb-1.5 block">渠道权重 (Weight)</label>
                       <input type="number" value={formData.preferences.weight || ''} onChange={e => updatePreference('weight', Number(e.target.value))} className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground" />
@@ -1070,6 +1078,14 @@ export default function Channels() {
                       </select>
                     </div>
                   </div>
+
+                  <RateLimitEditor
+                    value={formData.preferences.rate_limit}
+                    onChange={value => updatePreference('rate_limit', value)}
+                    title="渠道 API Key 限流"
+                    description="作用于当前渠道内部的上游 API Key 轮询。支持默认规则与按模型覆盖规则，模型作用域支持精确名或子串匹配。留空则回退为默认无限制。"
+                    allowModelScopes
+                  />
                 </section>
 
                 {/* 6. 高级设置 */}

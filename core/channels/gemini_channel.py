@@ -21,6 +21,7 @@ from ..utils import (
     upload_image_to_0x0st,
 )
 from ..response import check_response
+from ..file_utils import normalize_file_ref, require_resolved_file_data, raise_fileref_unsupported_error
 from urllib.parse import urlparse
 
 
@@ -40,6 +41,25 @@ async def format_image_message(image_url: str) -> dict:
         "inlineData": {
             "mimeType": image_type,
             "data": base64_image.split(",")[1],
+        }
+    }
+
+
+async def format_file_message(file_ref) -> dict:
+    """格式化 FileRef 为 Gemini inlineData。"""
+    normalized = await normalize_file_ref(file_ref)
+    if normalized.file_id:
+        raise_fileref_unsupported_error("Gemini", normalized.mime_type, "图片、PDF、文本附件（需提供 file.url/file.data）")
+
+    mime_type, base64_data = require_resolved_file_data(
+        normalized,
+        "Gemini",
+        "图片、PDF、文本附件（需提供 file.url/file.data）",
+    )
+    return {
+        "inlineData": {
+            "mimeType": mime_type,
+            "data": base64_data,
         }
     }
 
@@ -171,6 +191,9 @@ async def get_gemini_payload(request, engine, provider, api_key=None):
                     parts.append(format_text_message(item.text))
                 elif item.type == "image_url" and provider.get("image", True):
                     parts.append(await format_image_message(item.image_url.url))
+                elif item.type == "file" and getattr(item, "file", None):
+                    parts.append(await format_file_message(item.file))
+
         elif msg.content:
             parts.append({"text": msg.content})
 

@@ -252,7 +252,7 @@ async def process_request(
                     debug=is_debug
                 )
             else:
-                generator = fetch_response(client, url, headers, payload, engine, original_model, timeout_value)
+                generator = fetch_response(client, url, headers, payload, engine, original_model, timeout_value, enabled_plugins=enabled_plugins)
                 wrapped_generator, first_response_time = await error_handling_wrapper(
                     generator, channel_id, engine, request.stream,
                     app.state.error_triggers, keepalive_interval=keepalive_interval,

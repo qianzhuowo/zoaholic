@@ -28,6 +28,7 @@ from core.models import ModerationRequest, UnifiedRequest
 from core.stats import update_stats
 from core.utils import truncate_for_logging
 from core.error_response import openai_error_response
+from core.auth_errors import AUTH_API_KEY_INVALID, get_auth_error_message
 from utils import safe_get
 from db import DISABLE_DATABASE
 
@@ -194,7 +195,11 @@ class StatsMiddleware:
             # 标准端点：执行完整认证
             token = get_api_key_from_headers(headers)
             if not token:
-                response = openai_error_response("Invalid or missing API Key", 403)
+                response = openai_error_response(
+                    get_auth_error_message(AUTH_API_KEY_INVALID),
+                    403,
+                    code=AUTH_API_KEY_INVALID,
+                )
                 await response(scope, receive, send)
                 return
 
@@ -230,7 +235,11 @@ class StatsMiddleware:
                         await response(scope, receive, send)
                         return
             else:
-                response = openai_error_response("Invalid or missing API Key", 403)
+                response = openai_error_response(
+                    get_auth_error_message(AUTH_API_KEY_INVALID),
+                    403,
+                    code=AUTH_API_KEY_INVALID,
+                )
                 await response(scope, receive, send)
                 return
 

@@ -6,15 +6,94 @@ import os
 import string
 import secrets
 
+from typing import Any
 from fastapi import APIRouter, Depends, Body, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
 from core.env import env_bool
+from core.utils import parse_rate_limit, ThreadSafeCircularList, ApiKeyRateLimitRegistry, safe_get
 from utils import update_config, API_YAML_PATH, yaml, dump_config_to_json_obj
 from routes.deps import rate_limit_dependency, verify_admin_api_key, get_app
 
 router = APIRouter()
+
+
+def _validate_rate_limit_value(value: Any, field_path: str, *, allow_model_map: bool) -> None:
+    if value is None:
+        return
+
+    if isinstance(value, str):
+        try:
+            parse_rate_limit(value)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rate Limit 配置无效（{field_path}）：{exc}。示例：15/min,100/hour"
+            ) from exc
+        return
+
+    if allow_model_map and isinstance(value, dict):
+        for model_name, model_limit in value.items():
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise HTTPException(status_code=400, detail=f"Rate Limit 配置无效（{field_path}）：模型作用域名称不能为空")
+            if not isinstance(model_limit, str):
+                raise HTTPException(status_code=400, detail=f"Rate Limit 配置无效（{field_path}.{model_name}）：必须是字符串，例如 15/min,100/hour")
+            try:
+                parse_rate_limit(model_limit)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Rate Limit 配置无效（{field_path}.{model_name}）：{exc}。示例：15/min,100/hour"
+                ) from exc
+        return
+
+    expected = "字符串（如 15/min,100/hour）"
+    if allow_model_map:
+        expected += "，或模型到限流表达式的映射"
+    raise HTTPException(status_code=400, detail=f"Rate Limit 配置无效（{field_path}）：必须是{expected}")
+
+
+def _validate_config_rate_limits(config: dict) -> None:
+    _validate_rate_limit_value(safe_get(config, "preferences", "rate_limit", default=None), "preferences.rate_limit", allow_model_map=False)
+
+    for idx, provider in enumerate(config.get("providers") or []):
+        provider_name = safe_get(provider, "provider", default=f"providers[{idx}]")
+        _validate_rate_limit_value(safe_get(provider, "preferences", "rate_limit", default=None), f"providers[{idx}]({provider_name}).preferences.rate_limit", allow_model_map=True)
+
+    for idx, api_key in enumerate(config.get("api_keys") or []):
+        api_key_name = safe_get(api_key, "name", default=safe_get(api_key, "api", default=f"api_keys[{idx}]"))
+        _validate_rate_limit_value(safe_get(api_key, "preferences", "rate_limit", default=None), f"api_keys[{idx}]({api_key_name}).preferences.rate_limit", allow_model_map=True)
+
+
+def _refresh_runtime_rate_limit_state(app) -> None:
+    """刷新运行中的全局/API Key 限流器，使配置变更立即生效。"""
+    app.state.user_api_keys_rate_limit = ApiKeyRateLimitRegistry(
+        config_getter=lambda: app.state.config,
+        api_list_getter=lambda: app.state.api_list,
+    )
+    for current_api_index, api_key in enumerate(app.state.api_list):
+        app.state.user_api_keys_rate_limit[api_key] = ThreadSafeCircularList(
+            [api_key],
+            safe_get(
+                app.state.config,
+                'api_keys',
+                current_api_index,
+                'preferences',
+                'rate_limit',
+                default={"default": "999999/min"},
+            ),
+            "round_robin",
+        )
+    app.state.global_rate_limit = parse_rate_limit(safe_get(app.state.config, 'preferences', 'rate_limit', default='999999/min'))
+    app.state.admin_api_key = [
+        item.get("api")
+        for item in (app.state.api_keys_db or [])
+        if isinstance(item, dict) and "admin" in str(item.get("role", ""))
+    ]
+    if not app.state.admin_api_key and app.state.api_keys_db:
+        first_key = safe_get(app.state.api_keys_db, 0, "api")
+        app.state.admin_api_key = [first_key] if first_key else []
 
 
 @router.get("/v1/generate-api-key", dependencies=[Depends(rate_limit_dependency)])
@@ -67,6 +146,8 @@ async def api_config_update(
         app.state.config["preferences"].update(config["preferences"])
         updated = True
 
+    _validate_config_rate_limits(app.state.config)
+
     if not updated:
         raise HTTPException(
             status_code=400,
@@ -93,6 +174,9 @@ async def api_config_update(
     except Exception as e:
         # 不允许“假成功”：只要持久化过程有异常，直接返回非 200
         raise HTTPException(status_code=500, detail=f"Failed to update/persist config: {e}") from e
+
+    # 动态刷新限流配置，避免已存在 API key 继续使用旧限流器
+    _refresh_runtime_rate_limit_state(app)
 
     # 进一步防止“假成功”：当本次要求写 yaml 时，回读文件校验关键段一致。
     if save_to_file:

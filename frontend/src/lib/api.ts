@@ -12,15 +12,27 @@ import { useAuthStore } from '../store/authStore';
  * - 仅当后端错误明确指向“本地鉴权失败”（token 缺失/失效/过期）时，才自动登出并跳转 /login。
  */
 
-function looksLikeLocalAuthFailure(detail: string): boolean {
-  const d = (detail || '').toLowerCase();
-  // core/auth.py、routes/auth.py 里常见的鉴权失败文案
-  return (
-    d.includes('invalid or missing credentials') ||
-    d.includes('invalid or expired token') ||
-    d.includes('not authenticated') ||
-    d.includes('could not validate credentials')
-  );
+// 与后端 core/auth_errors.py 保持对齐。
+const LOCAL_AUTH_FAILURE_CODES = new Set([
+  'AUTH_API_KEY_INVALID',
+  'AUTH_ADMIN_CREDENTIALS_INVALID',
+  'AUTH_TOKEN_INVALID',
+  'AUTH_PERMISSION_DENIED',
+]);
+
+const LOCAL_AUTH_FAILURE_DETAILS = new Set([
+  'Invalid or missing API Key',
+  'Invalid or missing credentials',
+  'Invalid or expired token',
+  'Permission denied',
+]);
+
+function looksLikeLocalAuthFailureCode(code: unknown): boolean {
+  return typeof code === 'string' && LOCAL_AUTH_FAILURE_CODES.has(code.trim());
+}
+
+function looksLikeLocalAuthFailureMessage(detail: unknown): boolean {
+  return typeof detail === 'string' && LOCAL_AUTH_FAILURE_DETAILS.has(detail.trim());
 }
 
 async function shouldAutoLogoutOnAuthError(res: Response): Promise<boolean> {
@@ -35,20 +47,30 @@ async function shouldAutoLogoutOnAuthError(res: Response): Promise<boolean> {
       const data = JSON.parse(text);
 
       // FastAPI HTTPException: { detail: "..." }
+      // 统一错误响应：{ error: { message, code }, detail, error_code, details }
       if (data && typeof data === 'object') {
+        if (looksLikeLocalAuthFailureCode((data as any).error_code)) return true;
+
         const detail = (data as any).detail;
-        if (typeof detail === 'string' && looksLikeLocalAuthFailure(detail)) return true;
+        if (looksLikeLocalAuthFailureMessage(detail)) return true;
+
+        const details = (data as any).details;
+        if (details && typeof details === 'object') {
+          if (looksLikeLocalAuthFailureCode((details as any).error_code)) return true;
+          if (looksLikeLocalAuthFailureMessage((details as any).message)) return true;
+        }
 
         // OpenAI 风格错误：{ error: { message: "..." } }
         const err = (data as any).error;
         if (err && typeof err === 'object') {
+          if (looksLikeLocalAuthFailureCode((err as any).code)) return true;
           const msg = (err as any).message;
-          if (typeof msg === 'string' && looksLikeLocalAuthFailure(msg)) return true;
+          if (looksLikeLocalAuthFailureMessage(msg)) return true;
         }
       }
     } catch {
       // body 不是 JSON，就当作普通文本
-      if (looksLikeLocalAuthFailure(text)) return true;
+      if (looksLikeLocalAuthFailureMessage(text)) return true;
     }
   } catch {
     // ignore

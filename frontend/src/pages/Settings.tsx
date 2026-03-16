@@ -5,6 +5,7 @@ import {
   Settings2, Save, RefreshCw, AlertCircle, Clock, Zap, Shield,
   Timer, Database, Server, Blocks, Plus, Trash2, Edit2, Link
 } from 'lucide-react';
+import { RateLimitEditor } from '../components/RateLimitEditor';
 
 type CleanupAction = 'clear_fields' | 'delete_rows';
 type CleanupTimeMode = 'older_than_hours' | 'custom_range' | 'all';
@@ -340,16 +341,16 @@ export default function Settings() {
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Shield className="w-5 h-5 text-emerald-500" /> 安全与速率限制
           </div>
-          <div className="p-6">
-            <label className="text-sm font-medium text-foreground mb-1.5 block">全局速率限制</label>
-            <input
-              type="text"
-              value={preferences.rate_limit || '999999/min'}
-              onChange={e => updatePreference('rate_limit', e.target.value)}
-              placeholder="100/hour,1000/day"
-              className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm font-mono text-foreground"
+          <div className="p-6 space-y-4">
+            <RateLimitEditor
+              value={preferences.rate_limit}
+              onChange={value => updatePreference('rate_limit', value)}
+              title="全局速率限制"
+              description="作用于整个网关入口。留空则回退到默认无限制配置（999999/min）。支持组合多个时间窗口。"
             />
-            <p className="text-xs text-muted-foreground mt-2">支持组合：例如 "15/min,100/hour,1000/day"</p>
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-muted-foreground">
+              推荐做法：先设置短窗口保护突发流量（如 60/min），再叠加长窗口保护（如 5000/day）。
+            </div>
           </div>
         </section>
 

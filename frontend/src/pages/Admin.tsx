@@ -7,6 +7,8 @@ import {
   Wand2, Wallet, Brain, Download, Check, CopyCheck
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { RateLimitEditor } from '../components/RateLimitEditor';
+import { summarizeRateLimitConfig } from '../lib/rateLimit';
 
 // ========== Types ==========
 interface ApiKeyData {
@@ -47,6 +49,7 @@ export default function Admin() {
   const [formGroups, setFormGroups] = useState<string[]>(['default']);
   const [formModels, setFormModels] = useState<string[]>([]);
   const [formCredits, setFormCredits] = useState('');
+  const [formRateLimit, setFormRateLimit] = useState<string | Record<string, string> | undefined>(undefined);
 
   // Input states
   const [groupInput, setGroupInput] = useState('');
@@ -125,6 +128,7 @@ export default function Admin() {
 
       setFormModels(Array.isArray(source.model) ? [...source.model] : []);
       setFormCredits(source.preferences?.credits !== undefined ? String(source.preferences.credits) : '');
+      setFormRateLimit(source.preferences?.rate_limit);
     } else {
       setFormApi('');
       setFormName('');
@@ -132,6 +136,7 @@ export default function Admin() {
       setFormGroups(['default']);
       setFormModels([]);
       setFormCredits('');
+      setFormRateLimit(undefined);
     }
 
     setIsSheetOpen(true);
@@ -283,6 +288,7 @@ export default function Admin() {
       const num = Number(formCredits);
       if (!isNaN(num)) prefs.credits = num;
     }
+    if (formRateLimit) prefs.rate_limit = formRateLimit;
     if (Object.keys(prefs).length > 0) target.preferences = prefs;
 
     const newKeys = [...keys];
@@ -291,6 +297,15 @@ export default function Admin() {
       const existing = keys[editingIndex];
       if (existing.preferences) {
         target.preferences = { ...existing.preferences, ...prefs };
+        if (!formCredits.trim()) {
+          delete target.preferences.credits;
+        }
+        if (!formRateLimit) {
+          delete target.preferences.rate_limit;
+        }
+        if (Object.keys(target.preferences).length === 0) {
+          delete target.preferences;
+        }
       }
       newKeys[editingIndex] = target;
     } else {
@@ -479,6 +494,7 @@ export default function Admin() {
                 const name = keyObj.name || keyObj.preferences?.name || '未命名密钥';
                 const groups = keyObj.groups || (keyObj.group ? [keyObj.group] : ['default']);
                 const models = keyObj.model || [];
+                const rateLimitSummary = summarizeRateLimitConfig(keyObj.preferences?.rate_limit);
                 const modelText = models.length === 0 ? '默认: all' :
                   (models.length === 1 && models[0] === 'all') ? '全部模型 (all)' :
                     models.length > 3 ? `${models.slice(0, 3).join(', ')} 等 ${models.length} 条` : models.join(', ');
@@ -515,6 +531,9 @@ export default function Admin() {
                             <Folder className="w-3 h-3" />{g}
                           </span>
                         ))}
+                      </div>
+                      <div className="text-[11px] text-muted-foreground mt-2 truncate" title={rateLimitSummary}>
+                        Rate Limit: {rateLimitSummary}
                       </div>
                     </td>
                     <td className="px-6 py-4 text-center">
@@ -638,6 +657,18 @@ export default function Admin() {
                     className="w-full bg-background border border-border focus:border-primary px-3 py-2 rounded-lg text-sm text-foreground"
                   />
                   <p className="text-xs text-muted-foreground mt-1">与统计模块配合: credits - total_cost = 剩余余额</p>
+                </div>
+
+                <RateLimitEditor
+                  value={formRateLimit}
+                  onChange={setFormRateLimit}
+                  title="下游 API Key 专属 Rate Limit"
+                  description="支持设置默认限流规则以及按模型覆盖的限流。模型作用域支持精确名称或子串匹配；留空则不写入该 Key 的专属限流配置。"
+                  allowModelScopes
+                />
+
+                <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 text-xs text-muted-foreground">
+                  建议：默认作用域放通用阈值，模型作用域可单独压低高成本模型（如 gpt-4o / claude-3-7）。
                 </div>
               </section>
 

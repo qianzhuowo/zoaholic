@@ -14,7 +14,26 @@
 """
 
 from fastapi.responses import JSONResponse
-from typing import Optional, Union
+from typing import Any, Optional, Union
+
+
+def normalize_error_detail(detail: Any) -> tuple[str, Optional[Union[str, int]], Optional[str], Any]:
+    """将异常 detail 归一化为 message/code/param/raw_detail。"""
+    if isinstance(detail, dict):
+        message = (
+            detail.get("message")
+            or detail.get("detail")
+            or detail.get("error")
+            or str(detail)
+        )
+        code = detail.get("error_code") or detail.get("code")
+        param = detail.get("param")
+        return str(message), code, param, detail
+
+    if detail is None:
+        return "", None, None, None
+
+    return str(detail), None, None, detail
 
 
 # OpenAI 标准错误类型映射
@@ -33,12 +52,53 @@ ERROR_TYPE_MAP = {
 }
 
 
+DEFAULT_PROXY_ERROR_MESSAGE = "Reverse proxy request failed."
+DEFAULT_PROXY_ERROR_CODE = "reverse_proxy_error"
+DEFAULT_PROXY_ERROR_TYPE = "api_error"
+DEFAULT_PROXY_ERROR_STATUS = 502
+
+
+def normalize_proxy_error_policy(policy: Any) -> Optional[dict[str, Any]]:
+    """将插件/运行时配置归一化为统一反代错误策略。"""
+    if policy in (None, False, "", {}):
+        return None
+
+    if policy is True:
+        policy = {}
+    elif isinstance(policy, str):
+        policy = {"message": policy}
+    elif not isinstance(policy, dict):
+        policy = {}
+
+    status_code = policy.get("status_code", DEFAULT_PROXY_ERROR_STATUS)
+    try:
+        status_code = int(status_code)
+    except Exception:
+        status_code = DEFAULT_PROXY_ERROR_STATUS
+    if status_code < 100 or status_code > 599:
+        status_code = DEFAULT_PROXY_ERROR_STATUS
+
+    message = str(policy.get("message") or DEFAULT_PROXY_ERROR_MESSAGE)
+    error_type = str(policy.get("error_type") or DEFAULT_PROXY_ERROR_TYPE)
+    code = policy.get("code", DEFAULT_PROXY_ERROR_CODE)
+    if code is not None:
+        code = str(code)
+
+    return {
+        "status_code": status_code,
+        "message": message,
+        "error_type": error_type,
+        "code": code,
+    }
+
+
 def create_error_response(
     message: str,
     status_code: int = 500,
     error_type: Optional[str] = None,
     param: Optional[str] = None,
-    code: Optional[Union[str, int]] = None
+    code: Optional[Union[str, int]] = None,
+    detail: Optional[Any] = None,
 ) -> JSONResponse:
     """
     创建标准 OpenAI 风格的错误响应
@@ -78,13 +138,28 @@ def create_error_response(
     if code is not None:
         error_content["code"] = code
     
+    response_content: dict[str, Any] = {
+        "error": error_content,
+        "detail": message,
+    }
+    if code is not None:
+        response_content["error_code"] = code
+    if isinstance(detail, dict):
+        response_content["details"] = detail
+
     return JSONResponse(
         status_code=status_code,
-        content={"error": error_content}
+        content=response_content
     )
 
 
-def openai_error_response(message: str, status_code: int = 500) -> JSONResponse:
+def openai_error_response(
+    message: str,
+    status_code: int = 500,
+    *,
+    code: Optional[Union[str, int]] = None,
+    detail: Optional[Any] = None,
+) -> JSONResponse:
     """
     便捷方法：创建 OpenAI 风格错误响应
     
@@ -101,4 +176,32 @@ def openai_error_response(message: str, status_code: int = 500) -> JSONResponse:
         >>> response = openai_error_response("Invalid API Key", 403)
         >>> # 返回 403 响应，type="permission_denied_error"
     """
-    return create_error_response(message=message, status_code=status_code)
+    return create_error_response(message=message, status_code=status_code, code=code, detail=detail)
+
+
+def build_proxy_error_dict(policy: Any) -> dict[str, Any]:
+    normalized = normalize_proxy_error_policy(policy) or normalize_proxy_error_policy(True)
+    return {
+        "error": {
+            "message": normalized["message"],
+            "type": normalized["error_type"],
+            "code": normalized["code"],
+        },
+        "status_code": normalized["status_code"],
+        "details": {
+            "message": normalized["message"],
+            "code": normalized["code"],
+            "proxy_error": True,
+        },
+    }
+
+
+def create_proxy_error_response(policy: Any) -> JSONResponse:
+    normalized = normalize_proxy_error_policy(policy) or normalize_proxy_error_policy(True)
+    return create_error_response(
+        message=normalized["message"],
+        status_code=normalized["status_code"],
+        error_type=normalized["error_type"],
+        code=normalized["code"],
+        detail=None,
+    )

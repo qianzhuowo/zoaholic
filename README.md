@@ -39,6 +39,13 @@ Zoaholic 不再强迫所有请求转换为 OpenAI 格式。网关内置了智能
 - `claude_thinking`: 将 Claude 模型请求（后缀 `-thinking`）自动转换为带有 `<thinking>` 预填充的推理流，并在响应流中正确分离 `reasoning_content` 和普通 `content`。
 - `gemini_empty_retry`: 解决 Gemini 偶尔返回空响应的问题。
 - `claude_tools`: 增强 Claude 的函数调用能力。
+- `proxy_error_shield`: 将上游错误统一改写为反代错误，避免向调用方泄露供应商/渠道细节。
+
+### 🩺 可观测性与健康检查
+
+- 内置 `EventLoopBlockWatchdog`，可持续监控事件循环阻塞。
+- 提供 `/healthz` 与 `/readyz` 健康检查接口，便于接入 Docker / PaaS / K8s 探针。
+- 多模态输入标准见 `docs/multimodal-schema.md`。
 
 ### ⚖️ 企业级负载均衡
 继承自 uni-api 的强大核心引擎（`core/routing.py`）：

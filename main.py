@@ -26,7 +26,8 @@ from core.handler import (
     set_debug_mode as set_handler_debug_mode,
 )
 from core.middleware import StatsMiddleware, request_info, get_api_key
-from core.error_response import openai_error_response
+from core.error_response import openai_error_response, normalize_error_detail, create_proxy_error_response, normalize_proxy_error_policy
+from core.watchdog import EventLoopBlockWatchdog
 
 from utils import safe_get, load_config
 
@@ -338,6 +339,13 @@ async def lifespan(app: FastAPI):
     # 设置各模块的调试模式
     set_routing_debug_mode(is_debug)
     set_handler_debug_mode(is_debug)
+    app.state.version = VERSION
+    app.state.started_at = datetime.now(timezone.utc)
+    app.state.startup_completed = False
+
+    watchdog = EventLoopBlockWatchdog.from_env()
+    app.state.event_loop_watchdog = watchdog
+    await watchdog.start()
     
     # 启动定时清理任务
     cleanup_task = None
@@ -489,6 +497,7 @@ async def lifespan(app: FastAPI):
             default_timeout=DEFAULT_TIMEOUT,
         )
 
+    app.state.startup_completed = True
     yield
     # 关闭时的代码
     # 取消清理任务
@@ -506,6 +515,10 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     
+    app.state.startup_completed = False
+    if hasattr(app.state, 'event_loop_watchdog'):
+        await app.state.event_loop_watchdog.stop()
+
     # await app.state.client.aclose()
     if hasattr(app.state, 'client_manager'):
         await app.state.client_manager.close()
@@ -549,13 +562,47 @@ async def get_markdown_docs():
 
 # 自定义 RequestValidationError 处理已移除，如需可在单独模块中实现
 
+def _get_proxy_error_policy_from_context():
+    try:
+        current_info = request_info.get()
+    except Exception:
+        current_info = None
+    if isinstance(current_info, dict):
+        return normalize_proxy_error_policy(current_info.get("proxy_error_policy"))
+    return None
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == 404:
         token = await get_api_key(request)
         logger.error(f"404 Error: {exc.detail} api_key: {token}")
-    return openai_error_response(message=str(exc.detail), status_code=exc.status_code)
 
+    message, error_code, _param, raw_detail = normalize_error_detail(exc.detail)
+    proxy_error_policy = _get_proxy_error_policy_from_context()
+    if proxy_error_policy:
+        return create_proxy_error_response(proxy_error_policy)
+
+    return openai_error_response(
+        message=message,
+        status_code=exc.status_code,
+        code=error_code,
+        detail=raw_detail,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled application error: %s", exc)
+
+    proxy_error_policy = _get_proxy_error_policy_from_context()
+    if proxy_error_policy:
+        return create_proxy_error_response(proxy_error_policy)
+
+    return openai_error_response(
+        message="Internal server error",
+        status_code=500,
+    )
 
 # 配置 CORS 中间件
 app.add_middleware(

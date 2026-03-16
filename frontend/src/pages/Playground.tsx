@@ -1,10 +1,15 @@
-import { useState, useRef, useEffect, KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
 import {
+  PlaygroundAttachment, MAX_PLAYGROUND_ATTACHMENT_COUNT, MAX_PLAYGROUND_ATTACHMENT_SIZE,
+  decodeAttachmentText, formatAttachmentSize, getAttachmentPreviewSummary, isSupportedPlaygroundAttachment, readPlaygroundAttachment
+} from '../lib/playgroundAttachments';
+import {
   Send, Settings2, Trash2, RefreshCw, Copy, ChevronDown, ChevronRight,
   Brain, MessageSquare, Zap, MoreVertical, Edit3, CheckCheck, Loader2,
-  Terminal, Sparkles, Blocks, Thermometer, X, Key, CheckCircle2, AlertCircle, SlidersHorizontal
+  Terminal, Sparkles, Blocks, Thermometer, X, CheckCircle2, AlertCircle,
+  SlidersHorizontal, Paperclip, Image as ImageIcon, FileText, Eye
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -14,9 +19,15 @@ import * as Switch from '@radix-ui/react-switch';
 interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  attachments?: PlaygroundAttachment[];
   reasoning_content?: string;
   isTyping?: boolean;
 }
+
+type RequestContentItem =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'file'; file: { url: string; mime_type: string; filename: string } };
 
 interface ExternalClient {
   name: string;
@@ -50,8 +61,13 @@ export default function Playground() {
 
   const [showMobileSettings, setShowMobileSettings] = useState(false);
 
+  const [pendingAttachments, setPendingAttachments] = useState<PlaygroundAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<PlaygroundAttachment | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const getExternalLink = (template: string) => {
     const address = window.location.origin;
@@ -114,6 +130,92 @@ export default function Playground() {
     }
   };
 
+  const serializeMessage = (message: ChatMessage) => {
+    if (!message.attachments?.length) {
+      return { role: message.role, content: message.content };
+    }
+
+    const content: RequestContentItem[] = [];
+    if (message.content.trim()) {
+      content.push({ type: 'text', text: message.content.trim() });
+    }
+
+    for (const attachment of message.attachments) {
+      if (attachment.kind === 'image') {
+        content.push({
+          type: 'image_url',
+          image_url: { url: attachment.dataUrl }
+        });
+      } else {
+        content.push({
+          type: 'file',
+          file: {
+            url: attachment.dataUrl,
+            mime_type: attachment.mimeType,
+            filename: attachment.name
+          }
+        });
+      }
+    }
+
+    return {
+      role: message.role,
+      content: content.length ? content : [{ type: 'text', text: '' }]
+    };
+  };
+
+  const buildAttachmentError = (message: string) => `附件校验失败：${message}`;
+
+  const openAttachmentPreview = (attachment: PlaygroundAttachment) => setPreviewAttachment(attachment);
+
+  const openFilePicker = () => {
+    if (isGenerating || !token) return;
+    fileInputRef.current?.click();
+  };
+
+  const removePendingAttachment = (attachmentId: string) => {
+    setPendingAttachments(prev => prev.filter(item => item.id !== attachmentId));
+  };
+
+  const handleAttachmentSelect = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+
+    setAttachmentError(null);
+
+    if (pendingAttachments.length + files.length > MAX_PLAYGROUND_ATTACHMENT_COUNT) {
+      setAttachmentError(buildAttachmentError(`最多上传 ${MAX_PLAYGROUND_ATTACHMENT_COUNT} 个附件`));
+      return;
+    }
+
+    const invalidFile = files.find(file => !isSupportedPlaygroundAttachment(file));
+    if (invalidFile) {
+      setAttachmentError(buildAttachmentError(`暂不支持 ${invalidFile.name}，目前支持图片、PDF、TXT、Markdown、JSON、CSV、XML、YAML`));
+      return;
+    }
+
+    const oversizedFile = files.find(file => file.size > MAX_PLAYGROUND_ATTACHMENT_SIZE);
+    if (oversizedFile) {
+      setAttachmentError(buildAttachmentError(`${oversizedFile.name} 超过 ${(MAX_PLAYGROUND_ATTACHMENT_SIZE / 1024 / 1024).toFixed(0)} MB 限制`));
+      return;
+    }
+
+    try {
+      const nextAttachments = await Promise.all(files.map(file => readPlaygroundAttachment(file)));
+      setPendingAttachments(prev => [...prev, ...nextAttachments]);
+    } catch (error) {
+      setAttachmentError(buildAttachmentError(error instanceof Error ? error.message : '附件读取失败'));
+    }
+  };
+
+  const getAttachmentIcon = (attachment: PlaygroundAttachment) => {
+    if (attachment.kind === 'image') {
+      return <ImageIcon className="w-3.5 h-3.5" />;
+    }
+    return <FileText className="w-3.5 h-3.5" />;
+  };
+
   const sendMessage = async (newMessages: ChatMessage[]) => {
     if (!token || !selectedModel) return;
 
@@ -121,8 +223,8 @@ export default function Playground() {
     const msgList = [...newMessages];
 
     const requestMessages = systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...msgList]
-      : msgList;
+      ? [{ role: 'system', content: systemPrompt }, ...msgList.map(serializeMessage)]
+      : msgList.map(serializeMessage);
 
     const appendSystemError = (text: string) => {
       const msg = (text || '未知错误').toString();
@@ -285,11 +387,19 @@ export default function Playground() {
   };
 
   const handleSend = () => {
-    if (!inputValue.trim() || isGenerating) return;
-    const userMsg: ChatMessage = { role: 'user', content: inputValue.trim() };
+    const trimmedInput = inputValue.trim();
+    if ((!trimmedInput && pendingAttachments.length === 0) || isGenerating) return;
+
+    const userMsg: ChatMessage = {
+      role: 'user',
+      content: trimmedInput,
+      attachments: pendingAttachments.length ? pendingAttachments : undefined
+    };
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setInputValue('');
+    setPendingAttachments([]);
+    setAttachmentError(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     sendMessage(newMessages);
   };
@@ -474,11 +584,54 @@ export default function Playground() {
                         <button onClick={() => setEditingIndex(null)} className="px-3 py-1.5 text-xs bg-muted text-foreground rounded hover:bg-muted/80">取消</button>
                         <button onClick={() => saveEdit(idx)} className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90">保存{msg.role === 'user' ? '并重发' : ''}</button>
                       </div>
+                      {msg.attachments?.length ? (
+                        <div className="text-xs text-muted-foreground">
+                          当前消息包含 {msg.attachments.length} 个附件，编辑文本时会保留附件。
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
-                    <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                      {msg.content}
-                      {msg.isTyping && <span className="inline-block w-2 h-4 bg-muted-foreground ml-1 animate-pulse align-middle" />}
+                    <div className="space-y-3">
+                      {msg.content ? (
+                        <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                          {msg.content}
+                          {msg.isTyping && <span className="inline-block w-2 h-4 bg-muted-foreground ml-1 animate-pulse align-middle" />}
+                        </div>
+                      ) : msg.isTyping ? (
+                        <div className="text-sm leading-relaxed whitespace-pre-wrap">
+                          <span className="inline-block w-2 h-4 bg-muted-foreground animate-pulse align-middle" />
+                        </div>
+                      ) : null}
+
+                      {msg.attachments?.length ? (
+                        <div className="space-y-2">
+                          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">附件</div>
+                          <div className="flex flex-wrap gap-2">
+                            {msg.attachments.map(attachment => (
+                              <button
+                                key={attachment.id}
+                                type="button"
+                                onClick={() => openAttachmentPreview(attachment)}
+                                className="max-w-[240px] text-left rounded-xl border border-border bg-background/60 overflow-hidden hover:border-primary/40 hover:bg-background transition-colors"
+                                title="点击预览附件"
+                              >
+                                {attachment.kind === 'image' ? (
+                                  <img src={attachment.dataUrl} alt={attachment.name} className="w-full h-28 object-cover bg-muted" />
+                                ) : null}
+                                <div className="px-3 py-2 text-xs flex items-start gap-2">
+                                  <div className="mt-0.5 text-muted-foreground">{getAttachmentIcon(attachment)}</div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate font-medium text-foreground">{attachment.name}</div>
+                                    <div className="text-muted-foreground truncate">{attachment.mimeType} · {formatAttachmentSize(attachment.size)}</div>
+                                    <div className="text-muted-foreground/80 mt-1 line-clamp-2">{getAttachmentPreviewSummary(attachment)}</div>
+                                  </div>
+                                  <Eye className="w-3.5 h-3.5 text-muted-foreground" />
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -518,35 +671,136 @@ export default function Playground() {
 
         {/* Input Area */}
         <div className="p-4 md:px-10 bg-background/60 backdrop-blur-sm border-t border-border flex-shrink-0">
-          <div className="max-w-4xl mx-auto relative bg-muted border border-border focus-within:border-primary rounded-xl overflow-hidden transition-colors">
-            <textarea
-              ref={textareaRef}
-              value={inputValue}
-              onChange={e => {
-                setInputValue(e.target.value);
-                e.target.style.height = 'auto';
-                e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
-              }}
-              onKeyDown={handleKeyDown}
-              placeholder={token ? "输入消息 (Shift + Enter 换行)..." : "请先登录..."}
-              disabled={!token || isGenerating}
-              className="w-full bg-transparent text-foreground p-4 pr-12 text-sm max-h-[200px] resize-none focus:outline-none placeholder:text-muted-foreground disabled:opacity-50"
-              rows={1}
+          <div className="max-w-4xl mx-auto bg-muted border border-border focus-within:border-primary rounded-xl overflow-hidden transition-colors">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.xml,.yaml,.yml"
+              className="hidden"
+              onChange={handleAttachmentSelect}
             />
-            <button
-              onClick={handleSend}
-              disabled={!inputValue.trim() || isGenerating || !token}
-              className="absolute right-3 bottom-3 p-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg disabled:opacity-50 disabled:hover:bg-primary transition-all shadow-md"
-            >
-              {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            </button>
+
+            {pendingAttachments.length ? (
+              <div className="px-4 pt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {pendingAttachments.map(attachment => (
+                  <div key={attachment.id} className="rounded-xl border border-border bg-background/80 overflow-hidden">
+                    {attachment.kind === 'image' ? <img src={attachment.dataUrl} alt={attachment.name} className="w-full h-28 object-cover bg-muted" /> : null}
+                    <div className="px-3 py-2 space-y-2 text-xs text-foreground">
+                      <div className="flex items-start gap-2">
+                        <span className="mt-0.5 text-muted-foreground">{getAttachmentIcon(attachment)}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-medium">{attachment.name}</div>
+                          <div className="text-muted-foreground truncate">{attachment.mimeType} · {formatAttachmentSize(attachment.size)}</div>
+                          <div className="text-muted-foreground/80 mt-1 line-clamp-2">{getAttachmentPreviewSummary(attachment)}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openAttachmentPreview(attachment)}
+                          className="px-2.5 py-1 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex items-center gap-1"
+                        >
+                          <Eye className="w-3.5 h-3.5" /> 预览
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removePendingAttachment(attachment.id)}
+                          className="px-2.5 py-1 rounded-md border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-colors flex items-center gap-1"
+                        >
+                          <X className="w-3.5 h-3.5" /> 移除
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {attachmentError ? (
+              <div className="px-4 pt-3 text-xs text-red-500">{attachmentError}</div>
+            ) : null}
+
+            <div className="relative">
+              <textarea
+                ref={textareaRef}
+                value={inputValue}
+                onChange={e => {
+                  setInputValue(e.target.value);
+                  e.target.style.height = 'auto';
+                  e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder={token ? "输入消息，可附加图片/PDF/文本附件..." : "请先登录..."}
+                disabled={!token || isGenerating}
+                className="w-full bg-transparent text-foreground p-4 pl-14 pr-12 text-sm max-h-[200px] resize-none focus:outline-none placeholder:text-muted-foreground disabled:opacity-50"
+                rows={1}
+              />
+
+              <button
+                onClick={openFilePicker}
+                disabled={!token || isGenerating || pendingAttachments.length >= MAX_PLAYGROUND_ATTACHMENT_COUNT}
+                className="absolute left-3 bottom-3 p-2 text-muted-foreground hover:text-foreground hover:bg-background/80 rounded-lg disabled:opacity-50 transition-colors"
+                title="上传附件"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+
+              <button
+                onClick={handleSend}
+                disabled={(!inputValue.trim() && pendingAttachments.length === 0) || isGenerating || !token}
+                className="absolute right-3 bottom-3 p-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg disabled:opacity-50 disabled:hover:bg-primary transition-all shadow-md"
+              >
+                {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
           <div className="max-w-4xl mx-auto mt-2 text-xs text-muted-foreground flex justify-between">
-            <span>使用 Shift + Enter 换行</span>
+            <span>Shift + Enter 换行，支持图片 / PDF / 文本附件</span>
             <span>已启用 {stream ? '流式输出' : '非流式输出'}</span>
           </div>
         </div>
       </div>
+
+
+      <Dialog.Root open={Boolean(previewAttachment)} onOpenChange={open => { if (!open) setPreviewAttachment(null); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40" />
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,960px)] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-2xl border border-border bg-background shadow-2xl">
+            {previewAttachment ? (
+              <>
+                <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+                  <div className="min-w-0">
+                    <Dialog.Title className="text-base font-semibold text-foreground truncate">{previewAttachment.name}</Dialog.Title>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {previewAttachment.mimeType} · {formatAttachmentSize(previewAttachment.size)}
+                    </div>
+                  </div>
+                  <Dialog.Close className="rounded-lg p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+                    <X className="w-4 h-4" />
+                  </Dialog.Close>
+                </div>
+
+                <div className="max-h-[calc(85vh-74px)] overflow-auto p-5 bg-muted/20">
+                  {previewAttachment.kind === 'image' ? (
+                    <img src={previewAttachment.dataUrl} alt={previewAttachment.name} className="max-w-full max-h-[70vh] mx-auto rounded-xl border border-border bg-background object-contain" />
+                  ) : previewAttachment.mimeType === 'application/pdf' ? (
+                    <iframe
+                      src={previewAttachment.dataUrl}
+                      title={previewAttachment.name}
+                      className="w-full h-[70vh] rounded-xl border border-border bg-background"
+                    />
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words rounded-xl border border-border bg-background p-4 text-sm text-foreground font-mono">
+                      {previewAttachment.previewText || decodeAttachmentText(previewAttachment.dataUrl)}
+                    </pre>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
 
       {/* Right: Parameters Panel */}

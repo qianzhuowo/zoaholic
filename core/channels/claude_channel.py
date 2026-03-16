@@ -19,6 +19,12 @@ from ..utils import (
     generate_no_stream_response,
     end_of_line,
 )
+from ..file_utils import (
+    normalize_file_ref,
+    raise_fileref_unsupported_error,
+    require_resolved_file_data,
+    require_text_file_content,
+)
 from ..response import check_response
 
 
@@ -87,6 +93,44 @@ async def format_image_message(image_url: str) -> dict:
             "media_type": image_type,
             "data": base64_image.split(",")[1],
         }
+    }
+
+
+async def format_file_message(file_ref) -> dict:
+    """格式化 FileRef 为 Claude 内容块。"""
+    normalized = await normalize_file_ref(file_ref)
+    if normalized.file_id:
+        raise_fileref_unsupported_error("Claude", normalized.mime_type, "图片、PDF、纯文本附件（需提供 file.url/file.data）")
+
+    if normalized.is_image:
+        mime_type, base64_data = require_resolved_file_data(normalized, "Claude", "图片、PDF、纯文本附件")
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64_data,
+            }
+        }
+
+    if normalized.is_pdf:
+        mime_type, base64_data = require_resolved_file_data(normalized, "Claude", "图片、PDF、纯文本附件")
+        payload = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64_data,
+            }
+        }
+        if normalized.filename:
+            payload["title"] = normalized.filename
+        return payload
+
+    text_content = require_text_file_content(normalized, "Claude", "图片、PDF、纯文本附件")
+    return {
+        "type": "text",
+        "text": normalized.render_text_attachment() or text_content,
     }
 
 
@@ -217,6 +261,8 @@ async def get_claude_payload(request, engine, provider, api_key=None):
                 elif item.type == "image_url" and provider.get("image", True):
                     image_message = await format_image_message(item.image_url.url)
                     content.append(image_message)
+                elif item.type == "file" and getattr(item, "file", None):
+                    content.append(await format_file_message(item.file))
         else:
             content = msg.content
             tool_calls = msg.tool_calls

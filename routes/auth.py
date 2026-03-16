@@ -16,6 +16,11 @@ from pydantic import BaseModel, Field
 from core.jwt_utils import issue_jwt, decode_jwt
 from core.security import verify_password
 from routes.deps import rate_limit_dependency, get_app
+from core.auth_errors import (
+    AUTH_LOGIN_INVALID_CREDENTIALS,
+    AUTH_TOKEN_INVALID,
+    auth_http_exception,
+)
 from db import DISABLE_DATABASE, async_session_scope, AdminUser, DB_TYPE
 
 
@@ -96,10 +101,10 @@ async def login(payload: LoginRequest = Body(...)):
         raise HTTPException(status_code=404, detail="Admin user not initialized. Please visit /setup.")
 
     if admin_user.username != payload.username:
-        raise HTTPException(status_code=403, detail="Invalid username or password")
+        raise auth_http_exception(AUTH_LOGIN_INVALID_CREDENTIALS)
 
     if not verify_password(payload.password, admin_user.password_hash):
-        raise HTTPException(status_code=403, detail="Invalid username or password")
+        raise auth_http_exception(AUTH_LOGIN_INVALID_CREDENTIALS)
 
     token = issue_jwt({"sub": admin_user.username, "role": "admin"})
 
@@ -121,7 +126,7 @@ async def me(request: Request):
 
     payload = decode_jwt(token)
     if not payload:
-        raise HTTPException(status_code=403, detail="Invalid or expired token")
+        raise auth_http_exception(AUTH_TOKEN_INVALID)
 
     role = str(payload.get("role", "user"))
     username = str(payload.get("sub", ""))

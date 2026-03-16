@@ -22,6 +22,29 @@ from routes.deps import rate_limit_dependency, verify_admin_api_key, get_app
 router = APIRouter()
 is_debug = env_bool("DEBUG", False)
 
+CHANNEL_TEST_REQUEST_PATCH_WHITELIST = frozenset({
+    "logprobs",
+    "top_logprobs",
+    "stream",
+    "include_usage",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "presence_penalty",
+    "frequency_penalty",
+    "n",
+    "user",
+    "tool_choice",
+    "tools",
+    "response_format",
+    "thinking",
+    "stream_options",
+    "chat_template_kwargs",
+})
+
 
 @router.get("/v1/channels", dependencies=[Depends(rate_limit_dependency)])
 async def get_channels(token: str = Depends(verify_admin_api_key)):
@@ -201,6 +224,37 @@ async def test_channel(
             if normalized:
                 results.append(normalized)
         return results
+
+    def _build_test_response(
+        *,
+        success: bool,
+        latency_ms: Optional[int],
+        message: str,
+        error: Optional[str] = None,
+        upstream_status_code: Optional[int] = None,
+        stream: bool = False,
+        response_preview: Optional[str] = None,
+        error_code: Optional[str] = None,
+        error_category: Optional[str] = None,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        auth_failed = upstream_status_code in (401, 403)
+        content = {
+            "success": success,
+            "latency_ms": latency_ms,
+            "message": message,
+            "upstream_status_code": upstream_status_code,
+            "auth_failed": auth_failed,
+            "stream": bool(stream),
+            "error_category": error_category or ("success" if success else "unknown"),
+        }
+        if error is not None:
+            content["error"] = error
+        if response_preview is not None:
+            content["response_preview"] = response_preview
+        if error_code is not None:
+            content["error_code"] = error_code
+        return JSONResponse(status_code=status_code, content=content)
     
     app = get_app()
 
@@ -323,9 +377,25 @@ async def test_channel(
     else:
         messages = [{"role": "user", "content": str(prompt)}]
 
-    request_patch = test_config.get("request_patch")
-    if not isinstance(request_patch, dict):
-        request_patch = {}
+    raw_request_patch = test_config.get("request_patch")
+    if not isinstance(raw_request_patch, dict):
+        raw_request_patch = {}
+
+    request_patch = {
+        key: value
+        for key, value in raw_request_patch.items()
+        if key in CHANNEL_TEST_REQUEST_PATCH_WHITELIST and value is not None
+    }
+    ignored_request_patch_keys = sorted(
+        str(key)
+        for key in raw_request_patch.keys()
+        if key not in CHANNEL_TEST_REQUEST_PATCH_WHITELIST
+    )
+    if ignored_request_patch_keys:
+        logger.info(
+            "Channel test ignored unsupported request_patch keys: %s",
+            ", ".join(ignored_request_patch_keys),
+        )
 
     # 常用字段（显式字段优先级 > request_patch > 默认值）
     def _get_first(*keys: str, default=None):
@@ -357,9 +427,15 @@ async def test_channel(
     except Exception:
         top_p = 1.0
 
-    # 允许额外字段透传（RequestModel extra=allow）
+    # 仅合并显式白名单字段，避免任意 request_patch 字段透传
+    extra_request_patch = {
+        key: value
+        for key, value in request_patch.items()
+        if key not in {"stream", "max_tokens", "temperature", "top_p"}
+    }
+
     test_request_payload = {
-        **request_patch,
+        **extra_request_patch,
         "model": model,
         "messages": messages,
         "stream": stream,
@@ -428,16 +504,14 @@ async def test_channel(
                         preview = f"<stream preview failed: {type(e).__name__}: {e}>"[:800]
 
                     if 200 <= upstream_status_code < 300:
-                        return JSONResponse(
-                            content={
-                                "success": True,
-                                "latency_ms": latency_ms,
-                                "message": "测试成功",
-                                "upstream_status_code": upstream_status_code,
-                                "auth_failed": auth_failed,
-                                "stream": True,
-                                "response_preview": preview,
-                            }
+                        return _build_test_response(
+                            success=True,
+                            latency_ms=latency_ms,
+                            message="测试成功",
+                            upstream_status_code=upstream_status_code,
+                            stream=True,
+                            response_preview=preview,
+                            error_category="success",
                         )
 
                     # 尝试读取错误文本（避免读太多）
@@ -449,18 +523,16 @@ async def test_channel(
                     if not err_text:
                         err_text = f"HTTP {upstream_status_code}"
 
-                    return JSONResponse(
-                        status_code=200,
-                        content={
-                            "success": False,
-                            "latency_ms": latency_ms,
-                            "message": f"HTTP {upstream_status_code}",
-                            "error": err_text,
-                            "upstream_status_code": upstream_status_code,
-                            "auth_failed": auth_failed,
-                            "stream": True,
-                            "response_preview": preview,
-                        },
+                    return _build_test_response(
+                        success=False,
+                        latency_ms=latency_ms,
+                        message=f"HTTP {upstream_status_code}",
+                        error=err_text,
+                        upstream_status_code=upstream_status_code,
+                        stream=True,
+                        response_preview=preview,
+                        error_code="CHANNEL_TEST_UPSTREAM_AUTH_FAILED" if auth_failed else "CHANNEL_TEST_UPSTREAM_HTTP_ERROR",
+                        error_category="upstream_auth" if auth_failed else "upstream_http",
                     )
 
             # 非 stream：正常 post 并解析 JSON
@@ -509,59 +581,51 @@ async def test_channel(
             is_success = 200 <= upstream_status_code < 300 and not error_detail
 
             if is_success:
-                return JSONResponse(
-                    content={
-                        "success": True,
-                        "latency_ms": latency_ms,
-                        "message": "测试成功",
-                        "upstream_status_code": upstream_status_code,
-                        "auth_failed": auth_failed,
-                        "stream": False,
-                    }
+                return _build_test_response(
+                    success=True,
+                    latency_ms=latency_ms,
+                    message="测试成功",
+                    upstream_status_code=upstream_status_code,
+                    stream=False,
+                    error_category="success",
                 )
 
             if not error_detail:
                 error_detail = f"HTTP {upstream_status_code}"
 
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": False,
-                    "latency_ms": latency_ms,
-                    "message": f"HTTP {upstream_status_code}",
-                    "error": error_detail,
-                    "upstream_status_code": upstream_status_code,
-                    "auth_failed": auth_failed,
-                    "stream": False,
-                },
+            return _build_test_response(
+                success=False,
+                latency_ms=latency_ms,
+                message=f"HTTP {upstream_status_code}",
+                error=error_detail,
+                upstream_status_code=upstream_status_code,
+                stream=False,
+                error_code="CHANNEL_TEST_UPSTREAM_AUTH_FAILED" if auth_failed else "CHANNEL_TEST_UPSTREAM_HTTP_ERROR",
+                error_category="upstream_auth" if auth_failed else "upstream_http",
             )
                 
     except httpx.TimeoutException:
         latency_ms = int((time() - start_time) * 1000)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "latency_ms": latency_ms,
-                "message": "请求超时",
-                "error": f"请求超时（{timeout}秒）",
-                "upstream_status_code": None,
-                "auth_failed": False,
-                "stream": bool(stream),
-            }
+        return _build_test_response(
+            success=False,
+            latency_ms=latency_ms,
+            message="请求超时",
+            error=f"请求超时（{timeout}秒）",
+            upstream_status_code=None,
+            stream=bool(stream),
+            error_code="CHANNEL_TEST_TIMEOUT",
+            error_category="timeout",
         )
     except httpx.ConnectError as e:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "latency_ms": None,
-                "message": "连接失败",
-                "error": str(e),
-                "upstream_status_code": None,
-                "auth_failed": False,
-                "stream": bool(stream),
-            }
+        return _build_test_response(
+            success=False,
+            latency_ms=None,
+            message="连接失败",
+            error=str(e),
+            upstream_status_code=None,
+            stream=bool(stream),
+            error_code="CHANNEL_TEST_CONNECT_ERROR",
+            error_category="connect",
         )
     except Exception as e:
         latency_ms = int((time() - start_time) * 1000) if time() - start_time > 0 else None
@@ -584,17 +648,15 @@ async def test_channel(
             import traceback
             traceback.print_exc()
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "latency_ms": latency_ms,
-                "message": "测试失败",
-                "error": error_message,
-                "upstream_status_code": None,
-                "auth_failed": False,
-                "stream": bool(stream),
-            }
+        return _build_test_response(
+            success=False,
+            latency_ms=latency_ms,
+            message="测试失败",
+            error=error_message,
+            upstream_status_code=None,
+            stream=bool(stream),
+            error_code="CHANNEL_TEST_INTERNAL_ERROR",
+            error_category="internal",
         )
 
 
