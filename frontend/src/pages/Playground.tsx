@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent } from 'react';
+import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, DragEvent } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
+import { MarkdownRenderer } from '../components/MarkdownRenderer';
 import {
   PlaygroundAttachment, MAX_PLAYGROUND_ATTACHMENT_COUNT, MAX_PLAYGROUND_ATTACHMENT_SIZE,
   decodeAttachmentText, formatAttachmentSize, getAttachmentPreviewSummary, isSupportedPlaygroundAttachment, readPlaygroundAttachment
@@ -50,6 +51,8 @@ export default function Playground() {
   const [temperature, setTemperature] = useState(0.7);
   const [stream, setStream] = useState(true);
 
+  const [markdownRendering, setMarkdownRendering] = useState(true);
+
   const [showThinking, setShowThinking] = useState<Record<number, boolean>>({});
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -64,10 +67,14 @@ export default function Playground() {
   const [pendingAttachments, setPendingAttachments] = useState<PlaygroundAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<PlaygroundAttachment | null>(null);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragCounterRef = useRef(0);
+
+  const containsDraggedFiles = (dataTransfer?: DataTransfer | null) => Array.from(dataTransfer?.types || []).includes('Files');
 
   const getExternalLink = (template: string) => {
     const address = window.location.origin;
@@ -177,9 +184,7 @@ export default function Playground() {
     setPendingAttachments(prev => prev.filter(item => item.id !== attachmentId));
   };
 
-  const handleAttachmentSelect = async (e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
+  const appendAttachments = async (files: File[]) => {
     if (!files.length) return;
 
     setAttachmentError(null);
@@ -207,6 +212,62 @@ export default function Playground() {
     } catch (error) {
       setAttachmentError(buildAttachmentError(error instanceof Error ? error.message : '附件读取失败'));
     }
+  };
+
+  const handleAttachmentSelect = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    await appendAttachments(files);
+  };
+
+  const resetDragState = () => {
+    dragCounterRef.current = 0;
+    setIsDraggingFiles(false);
+  };
+
+  useEffect(() => {
+    const clearDragState = () => resetDragState();
+
+    window.addEventListener('drop', clearDragState);
+    window.addEventListener('dragend', clearDragState);
+
+    return () => {
+      window.removeEventListener('drop', clearDragState);
+      window.removeEventListener('dragend', clearDragState);
+    };
+  }, []);
+
+  const handleComposerDragEnter = (e: DragEvent<HTMLDivElement>) => {
+    if (!token || isGenerating || !containsDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current += 1;
+    setIsDraggingFiles(true);
+  };
+
+  const handleComposerDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!token || isGenerating || !containsDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleComposerDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (!token || isGenerating || !containsDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) {
+      setIsDraggingFiles(false);
+    }
+  };
+
+  const handleComposerDrop = async (e: DragEvent<HTMLDivElement>) => {
+    if (!token || isGenerating || !containsDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    resetDragState();
+    await appendAttachments(Array.from(e.dataTransfer.files || []));
   };
 
   const getAttachmentIcon = (attachment: PlaygroundAttachment) => {
@@ -399,6 +460,7 @@ export default function Playground() {
     setMessages(newMessages);
     setInputValue('');
     setPendingAttachments([]);
+    resetDragState();
     setAttachmentError(null);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     sendMessage(newMessages);
@@ -484,7 +546,24 @@ export default function Playground() {
   }
 
   return (
-    <div className="flex h-full animate-in fade-in duration-500 font-sans rounded-2xl overflow-hidden border border-border bg-muted/20 shadow-sm">
+    <div
+      className="relative flex h-full animate-in fade-in duration-500 font-sans rounded-2xl overflow-hidden border border-border bg-muted/20 shadow-sm"
+      onDragEnter={handleComposerDragEnter}
+      onDragOver={handleComposerDragOver}
+      onDragLeave={handleComposerDragLeave}
+      onDrop={handleComposerDrop}
+    >
+      {isDraggingFiles ? (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-background/72 backdrop-blur-sm">
+          <div className="mx-6 flex max-w-lg flex-col items-center gap-3 rounded-3xl border border-primary/30 bg-background/95 px-8 py-8 text-center shadow-2xl">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <Paperclip className="h-6 w-6" />
+            </div>
+            <div className="text-lg font-semibold text-foreground">拖拽到任意区域即可上传附件</div>
+            <div className="text-sm text-muted-foreground">支持图片、PDF、TXT、Markdown、JSON、CSV、XML、YAML，松开鼠标后将自动加入当前对话输入区。</div>
+          </div>
+        </div>
+      ) : null}
       {/* Left: Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 bg-background/60 backdrop-blur-sm border-r border-border">
 
@@ -592,12 +671,17 @@ export default function Playground() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {msg.content ? (
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                          {msg.content}
-                          {msg.isTyping && <span className="inline-block w-2 h-4 bg-muted-foreground ml-1 animate-pulse align-middle" />}
+                      {msg.content ? (markdownRendering ? (
+                        <div className="text-sm leading-relaxed">
+                          <MarkdownRenderer content={msg.content} tone={msg.role === 'user' ? 'inverse' : 'default'} />
+                          {msg.isTyping ? <span className="inline-block w-2 h-4 bg-muted-foreground animate-pulse align-middle" /> : null}
                         </div>
-                      ) : msg.isTyping ? (
+                      ) : (
+                        <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                          {msg.content}
+                          {msg.isTyping ? <span className="inline-block w-2 h-4 bg-muted-foreground ml-1 animate-pulse align-middle" /> : null}
+                        </div>
+                      )) : msg.isTyping ? (
                         <div className="text-sm leading-relaxed whitespace-pre-wrap">
                           <span className="inline-block w-2 h-4 bg-muted-foreground animate-pulse align-middle" />
                         </div>
@@ -721,7 +805,7 @@ export default function Playground() {
               <div className="px-4 pt-3 text-xs text-red-500">{attachmentError}</div>
             ) : null}
 
-            <div className="relative">
+            <div className="relative transition-colors">
               <textarea
                 ref={textareaRef}
                 value={inputValue}
@@ -756,7 +840,7 @@ export default function Playground() {
             </div>
           </div>
           <div className="max-w-4xl mx-auto mt-2 text-xs text-muted-foreground flex justify-between">
-            <span>Shift + Enter 换行，支持图片 / PDF / 文本附件</span>
+            <span>Shift + Enter 换行，支持图片 / PDF / 文本附件，也支持拖拽上传</span>
             <span>已启用 {stream ? '流式输出' : '非流式输出'}</span>
           </div>
         </div>
@@ -866,6 +950,13 @@ export default function Playground() {
             </Switch.Root>
           </div>
 
+          <div className="flex items-center justify-between py-2 border-b border-border">
+            <span className="text-sm font-medium text-foreground">Markdown 渲染</span>
+            <Switch.Root checked={markdownRendering} onCheckedChange={setMarkdownRendering} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary transition-colors">
+              <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
+            </Switch.Root>
+          </div>
+
           {/* External Clients Accordion */}
           <div className="border border-border rounded-lg bg-muted/50 overflow-hidden">
             <button
@@ -970,6 +1061,13 @@ export default function Playground() {
               <div className="flex items-center justify-between py-2">
                 <span className="text-sm font-medium text-foreground">Stream Output</span>
                 <Switch.Root checked={stream} onCheckedChange={setStream} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary">
+                  <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
+                </Switch.Root>
+              </div>
+
+              <div className="flex items-center justify-between py-2">
+                <span className="text-sm font-medium text-foreground">Markdown 渲染</span>
+                <Switch.Root checked={markdownRendering} onCheckedChange={setMarkdownRendering} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary">
                   <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
                 </Switch.Root>
               </div>

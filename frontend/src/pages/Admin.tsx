@@ -8,7 +8,6 @@ import {
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { RateLimitEditor } from '../components/RateLimitEditor';
-import { summarizeRateLimitConfig } from '../lib/rateLimit';
 
 // ========== Types ==========
 interface ApiKeyData {
@@ -494,7 +493,6 @@ export default function Admin() {
                 const name = keyObj.name || keyObj.preferences?.name || '未命名密钥';
                 const groups = keyObj.groups || (keyObj.group ? [keyObj.group] : ['default']);
                 const models = keyObj.model || [];
-                const rateLimitSummary = summarizeRateLimitConfig(keyObj.preferences?.rate_limit);
                 const modelText = models.length === 0 ? '默认: all' :
                   (models.length === 1 && models[0] === 'all') ? '全部模型 (all)' :
                     models.length > 3 ? `${models.slice(0, 3).join(', ')} 等 ${models.length} 条` : models.join(', ');
@@ -531,9 +529,6 @@ export default function Admin() {
                             <Folder className="w-3 h-3" />{g}
                           </span>
                         ))}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground mt-2 truncate" title={rateLimitSummary}>
-                        Rate Limit: {rateLimitSummary}
                       </div>
                     </td>
                     <td className="px-6 py-4 text-center">
