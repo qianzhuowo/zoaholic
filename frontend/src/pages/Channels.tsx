@@ -13,7 +13,6 @@ import { InterceptorSheet } from '../components/InterceptorSheet';
 import { ChannelTestDialog } from '../components/ChannelTestDialog';
 import { ApiKeyTestDialog } from '../components/ApiKeyTestDialog';
 import { RateLimitEditor } from '../components/RateLimitEditor';
-import { summarizeRateLimitConfig } from '../lib/rateLimit';
 
 // ========== Types ==========
 interface ApiKeyObj {
@@ -686,7 +685,6 @@ export default function Channels() {
     const isEnabled = p.enabled !== false;
     const groups = Array.isArray(p.groups) ? p.groups : p.group ? [p.group] : ['default'];
     const plugins = p.preferences?.enabled_plugins || [];
-    const rateLimitSummary = summarizeRateLimitConfig(p.preferences?.rate_limit);
     const weight = p.preferences?.weight ?? p.weight ?? 0;
 
     return (
@@ -713,8 +711,6 @@ export default function Channels() {
             <span className="bg-primary/10 text-primary px-2 py-0.5 rounded text-xs flex items-center gap-1"><Puzzle className="w-3 h-3" /> {plugins.length}</span>
           )}
         </div>
-
-        <div className="text-xs text-muted-foreground mb-3 truncate" title={rateLimitSummary}>Rate Limit: {rateLimitSummary}</div>
 
 
         <div className="flex items-center justify-between pt-3 border-t border-border gap-2">
@@ -796,7 +792,6 @@ export default function Channels() {
                 const isEnabled = p.enabled !== false;
                 const groups = Array.isArray(p.groups) ? p.groups : p.group ? [p.group] : ['default'];
                 const plugins = p.preferences?.enabled_plugins || [];
-                const rateLimitSummary = summarizeRateLimitConfig(p.preferences?.rate_limit);
                 const weight = p.preferences?.weight ?? p.weight ?? 0;
 
                 return (
@@ -815,7 +810,6 @@ export default function Channels() {
                           ))}
                           {groups.length > 2 && <span className="text-xs text-muted-foreground">+{groups.length - 2}</span>}
                         </div>
-                        <span className="text-[11px] text-muted-foreground truncate" title={rateLimitSummary}>Rate Limit: {rateLimitSummary}</span>
                         <span className="text-xs text-muted-foreground font-mono">{p.engine || 'openai'}</span>
                       </div>
                     </td>
