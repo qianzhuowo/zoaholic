@@ -33,31 +33,31 @@ const TONE_STYLES: Record<MarkdownTone, Record<string, string>> = {
     root: 'text-foreground/95',
     heading: 'text-foreground',
     link: 'text-sky-600 dark:text-sky-400 hover:text-sky-500 dark:hover:text-sky-300',
-    inlineCode: 'border border-border/70 bg-muted/80 text-foreground shadow-sm',
-    codeShell: 'border border-border/80 bg-[#0b1020] text-slate-100 shadow-sm',
-    codeHeader: 'border-b border-white/10 bg-black/20 text-slate-300',
-    codeButton: 'text-slate-300 hover:text-white hover:bg-white/10',
-    quote: 'border-l-4 border-sky-500/40 bg-sky-500/5 text-foreground/85',
-    hr: 'border-border/70',
-    tableWrap: 'border border-border/80 bg-background/90 shadow-sm',
-    tableHead: 'bg-muted/70 text-foreground',
-    tableRow: 'border-t border-border/70',
-    tableCell: 'text-foreground/90'
+    inlineCode: 'border border-border/60 bg-muted/70 text-foreground/90 shadow-none',
+    codeShell: 'border border-border/60 bg-[#0d1117] text-slate-200 shadow-sm',
+    codeHeader: 'border-b border-white/[0.06] bg-[#161b22] text-slate-400',
+    codeButton: 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.06]',
+    quote: 'border-l-[3px] border-sky-500/30 bg-sky-500/[0.04] text-foreground/80',
+    hr: 'border-border/50',
+    tableWrap: 'border border-border/60 bg-background/80 shadow-sm',
+    tableHead: 'bg-muted/50 text-foreground/80',
+    tableRow: 'border-t border-border/50',
+    tableCell: 'text-foreground/85'
   },
   inverse: {
     root: 'text-primary-foreground/95',
     heading: 'text-primary-foreground',
-    link: 'text-primary-foreground underline decoration-primary-foreground/70 hover:decoration-primary-foreground',
-    inlineCode: 'border border-white/15 bg-black/20 text-primary-foreground',
-    codeShell: 'border border-white/10 bg-black/35 text-primary-foreground',
-    codeHeader: 'border-b border-white/10 bg-black/25 text-primary-foreground/75',
-    codeButton: 'text-primary-foreground/75 hover:text-primary-foreground hover:bg-white/10',
-    quote: 'border-l-4 border-white/35 bg-white/10 text-primary-foreground/85',
-    hr: 'border-white/20',
-    tableWrap: 'border border-white/10 bg-black/15',
-    tableHead: 'bg-white/10 text-primary-foreground',
-    tableRow: 'border-t border-white/10',
-    tableCell: 'text-primary-foreground/90'
+    link: 'text-primary-foreground underline decoration-primary-foreground/60 hover:decoration-primary-foreground',
+    inlineCode: 'border border-white/10 bg-black/15 text-primary-foreground/90',
+    codeShell: 'border border-white/[0.08] bg-black/30 text-primary-foreground/90',
+    codeHeader: 'border-b border-white/[0.06] bg-black/20 text-primary-foreground/60',
+    codeButton: 'text-primary-foreground/60 hover:text-primary-foreground hover:bg-white/[0.08]',
+    quote: 'border-l-[3px] border-white/25 bg-white/[0.06] text-primary-foreground/80',
+    hr: 'border-white/15',
+    tableWrap: 'border border-white/[0.08] bg-black/10',
+    tableHead: 'bg-white/[0.06] text-primary-foreground/80',
+    tableRow: 'border-t border-white/[0.08]',
+    tableCell: 'text-primary-foreground/85'
   }
 };
 
@@ -96,7 +96,7 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
           href={match[2]}
           target="_blank"
           rel="noreferrer"
-          className={`font-medium underline decoration-1 underline-offset-4 transition-colors break-all ${styles.link}`}
+          className={`font-medium underline decoration-1 underline-offset-[3px] transition-colors break-all ${styles.link}`}
         >
           {renderInline(match[1], `${keyPrefix}-link-text-${match.index}`, tone)}
         </a>
@@ -105,7 +105,7 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
       tokens.push(
         <code
           key={`${keyPrefix}-code-${match.index}`}
-          className={`rounded-md px-1.5 py-0.5 font-mono text-[0.92em] ${styles.inlineCode}`}
+          className={`rounded px-[5px] py-[1px] font-mono text-[0.88em] leading-none ${styles.inlineCode}`}
         >
           {match[3]}
         </code>
@@ -119,7 +119,7 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
       );
     } else if (match[6]) {
       tokens.push(
-        <del key={`${keyPrefix}-del-${match.index}`} className="opacity-80">
+        <del key={`${keyPrefix}-del-${match.index}`} className="opacity-70">
           {renderInline(match[6], `${keyPrefix}-del-text-${match.index}`, tone)}
         </del>
       );
@@ -266,10 +266,10 @@ function parseBlocks(content: string): MarkdownBlock[] {
 }
 
 function headingClassName(level: number) {
-  if (level === 1) return 'text-[1.5rem] leading-tight font-semibold tracking-tight';
-  if (level === 2) return 'text-[1.25rem] leading-tight font-semibold tracking-tight';
-  if (level === 3) return 'text-[1.05rem] leading-tight font-semibold';
-  return 'text-[0.95rem] leading-tight font-semibold uppercase tracking-wide';
+  if (level === 1) return 'text-lg leading-snug font-semibold tracking-tight';
+  if (level === 2) return 'text-[1.1rem] leading-snug font-semibold tracking-tight';
+  if (level === 3) return 'text-[1rem] leading-snug font-semibold';
+  return 'text-[0.9rem] leading-snug font-semibold';
 }
 
 function CodeBlock({ code, language, tone }: { code: string; language?: string; tone: MarkdownTone }) {
@@ -287,20 +287,20 @@ function CodeBlock({ code, language, tone }: { code: string; language?: string; 
   };
 
   return (
-    <div className={`overflow-hidden rounded-2xl ${styles.codeShell}`}>
-      <div className={`flex items-center justify-between gap-3 px-3 py-2 text-[11px] ${styles.codeHeader}`}>
-        <span className="truncate font-mono uppercase tracking-[0.18em]">{language || 'code'}</span>
+    <div className={`overflow-hidden rounded-xl ${styles.codeShell}`}>
+      <div className={`flex items-center justify-between gap-3 px-3.5 py-1.5 text-[11px] ${styles.codeHeader}`}>
+        <span className="truncate font-mono uppercase tracking-widest opacity-70">{language || 'code'}</span>
         <button
           type="button"
           onClick={handleCopy}
-          className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors ${styles.codeButton}`}
+          className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors ${styles.codeButton}`}
           title="复制代码"
         >
-          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
           {copied ? '已复制' : '复制'}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-4 text-[13px] leading-6 font-mono whitespace-pre">
+      <pre className="overflow-x-auto px-3.5 py-3 text-[12.5px] leading-[1.6] font-mono whitespace-pre">
         <code>{code}</code>
       </pre>
     </div>
@@ -322,15 +322,15 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         );
       case 'paragraph':
         return (
-          <p key={key} className="whitespace-pre-wrap break-words text-[15px] leading-7">
+          <p key={key} className="whitespace-pre-wrap break-words text-[13.5px] leading-[1.7]">
             {renderInline(block.content, `${key}-paragraph`, tone)}
           </p>
         );
       case 'unordered-list':
         return (
-          <ul key={key} className="list-disc space-y-2 pl-6 text-[15px] leading-7 marker:opacity-70">
+          <ul key={key} className="list-disc space-y-1 pl-5 text-[13.5px] leading-[1.7] marker:text-muted-foreground/40">
             {block.items.map((item, itemIndex) => (
-              <li key={`${key}-item-${itemIndex}`} className="break-words pl-1">
+              <li key={`${key}-item-${itemIndex}`} className="break-words pl-0.5">
                 {renderInline(item, `${key}-item-${itemIndex}`, tone)}
               </li>
             ))}
@@ -338,9 +338,9 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         );
       case 'ordered-list':
         return (
-          <ol key={key} className="list-decimal space-y-2 pl-6 text-[15px] leading-7 marker:opacity-70">
+          <ol key={key} className="list-decimal space-y-1 pl-5 text-[13.5px] leading-[1.7] marker:text-muted-foreground/40">
             {block.items.map((item, itemIndex) => (
-              <li key={`${key}-item-${itemIndex}`} className="break-words pl-1">
+              <li key={`${key}-item-${itemIndex}`} className="break-words pl-0.5">
                 {renderInline(item, `${key}-item-${itemIndex}`, tone)}
               </li>
             ))}
@@ -350,20 +350,20 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         return <CodeBlock key={key} code={block.content} language={block.language} tone={tone} />;
       case 'blockquote':
         return (
-          <div key={key} className={`rounded-r-2xl px-4 py-3 ${styles.quote}`}>
-            <div className="space-y-3">
+          <div key={key} className={`rounded-r-xl px-3.5 py-2.5 ${styles.quote}`}>
+            <div className="space-y-2">
               {renderBlocks(parseBlocks(block.content), `${key}-quote`, tone)}
             </div>
           </div>
         );
       case 'table':
         return (
-          <div key={key} className={`overflow-x-auto rounded-2xl ${styles.tableWrap}`}>
-            <table className="min-w-full border-collapse text-left text-sm">
+          <div key={key} className={`overflow-x-auto rounded-xl ${styles.tableWrap}`}>
+            <table className="min-w-full border-collapse text-left text-[13px]">
               <thead className={styles.tableHead}>
                 <tr>
                   {block.headers.map((header, headerIndex) => (
-                    <th key={`${key}-header-${headerIndex}`} className="px-4 py-3 font-semibold whitespace-nowrap">
+                    <th key={`${key}-header-${headerIndex}`} className="px-3 py-2 font-semibold whitespace-nowrap text-[12.5px]">
                       {renderInline(header, `${key}-header-${headerIndex}`, tone)}
                     </th>
                   ))}
@@ -373,7 +373,7 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
                 {block.rows.map((row, rowIndex) => (
                   <tr key={`${key}-row-${rowIndex}`} className={styles.tableRow}>
                     {row.map((cell, cellIndex) => (
-                      <td key={`${key}-cell-${rowIndex}-${cellIndex}`} className={`px-4 py-3 align-top whitespace-pre-wrap ${styles.tableCell}`}>
+                      <td key={`${key}-cell-${rowIndex}-${cellIndex}`} className={`px-3 py-2 align-top whitespace-pre-wrap ${styles.tableCell}`}>
                         {renderInline(cell, `${key}-cell-${rowIndex}-${cellIndex}`, tone)}
                       </td>
                     ))}
@@ -397,7 +397,7 @@ export function MarkdownRenderer({ content, className = '', tone = 'default' }: 
   if (!trimmed) return null;
 
   return (
-    <div className={`space-y-4 break-words text-left ${TONE_STYLES[tone].root} ${className}`.trim()}>
+    <div className={`space-y-2.5 break-words text-left ${TONE_STYLES[tone].root} ${className}`.trim()}>
       {renderBlocks(blocks, 'markdown', tone)}
     </div>
   );

@@ -4,12 +4,12 @@ import { apiFetch } from '../lib/api';
 import { MarkdownRenderer } from '../components/MarkdownRenderer';
 import {
   PlaygroundAttachment, MAX_PLAYGROUND_ATTACHMENT_COUNT, MAX_PLAYGROUND_ATTACHMENT_SIZE,
-  decodeAttachmentText, formatAttachmentSize, getAttachmentPreviewSummary, isSupportedPlaygroundAttachment, readPlaygroundAttachment
+  decodeAttachmentText, formatAttachmentSize, isSupportedPlaygroundAttachment, readPlaygroundAttachment
 } from '../lib/playgroundAttachments';
 import {
   Send, Settings2, Trash2, RefreshCw, Copy, ChevronDown, ChevronRight,
   Brain, MessageSquare, Zap, MoreVertical, Edit3, CheckCheck, Loader2,
-  Terminal, Sparkles, Blocks, Thermometer, X, CheckCircle2, AlertCircle,
+  Sparkles, Blocks, Thermometer, X, CheckCircle2, AlertCircle,
   SlidersHorizontal, Paperclip, Image as ImageIcon, FileText, Eye
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -78,8 +78,6 @@ export default function Playground() {
 
   const getExternalLink = (template: string) => {
     const address = window.location.origin;
-    // 外部客户端链接仍使用管理员 API Key（不是 JWT）。
-    // 这里从后端 /auth/me 获取（前端不直接存储 admin_api_key）。
     return template.replace('{key}', '').replace('{address}', address);
   };
 
@@ -272,9 +270,9 @@ export default function Playground() {
 
   const getAttachmentIcon = (attachment: PlaygroundAttachment) => {
     if (attachment.kind === 'image') {
-      return <ImageIcon className="w-3.5 h-3.5" />;
+      return <ImageIcon className="w-3 h-3" />;
     }
-    return <FileText className="w-3.5 h-3.5" />;
+    return <FileText className="w-3 h-3" />;
   };
 
   const sendMessage = async (newMessages: ChatMessage[]) => {
@@ -360,7 +358,6 @@ export default function Playground() {
             try {
               const data = JSON.parse(dataStr);
 
-              // 标准 OpenAI 风格错误：{"error": {"message": "..."}}
               if (data?.error) {
                 const errMsg = typeof data.error === 'string'
                   ? data.error
@@ -368,7 +365,6 @@ export default function Playground() {
 
                 try { await reader.cancel(); } catch { }
                 setMessages(prev => {
-                  // 结束 typing，并追加 system 错误
                   const updated = [...prev];
                   if (updated[assistantIndex]) {
                     updated[assistantIndex] = {
@@ -384,7 +380,6 @@ export default function Playground() {
                 return;
               }
 
-              // 部分网关会把错误塞到 choices[0].error
               const choiceErr = data?.choices?.[0]?.error;
               if (choiceErr) {
                 const errMsg = choiceErr.message || JSON.stringify(choiceErr);
@@ -518,22 +513,118 @@ export default function Playground() {
     }
   };
 
+  // ========== Sidebar Settings Panel (shared between desktop & mobile) ==========
+  const SettingsPanel = ({ isMobile = false }: { isMobile?: boolean }) => (
+    <div className={`space-y-4 ${isMobile ? '' : 'text-[13px]'}`}>
+      {/* System Prompt */}
+      <div>
+        <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1 mb-1.5">
+          <Brain className="w-3 h-3" /> System Prompt
+        </label>
+        <textarea
+          value={systemPrompt}
+          onChange={e => setSystemPrompt(e.target.value)}
+          placeholder="你是一个有帮助的 AI 助手..."
+          className="w-full bg-muted/60 border border-border focus:border-primary/60 p-2.5 rounded-lg text-[13px] text-foreground h-20 resize-none outline-none transition-colors placeholder:text-muted-foreground/60"
+        />
+      </div>
+
+      {/* Model Selection */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">Model</label>
+          <button onClick={fetchModels} className={`text-muted-foreground hover:text-primary transition-colors ${loadingModels ? 'animate-spin' : ''}`} title="刷新模型列表">
+            <RefreshCw className="w-3 h-3" />
+          </button>
+        </div>
+        <select
+          value={selectedModel}
+          onChange={e => setSelectedModel(e.target.value)}
+          className="w-full bg-muted/60 border border-border focus:border-primary/60 px-2.5 py-2 rounded-lg text-[13px] text-foreground outline-none transition-colors"
+        >
+          <option value="" disabled>选择模型...</option>
+          {models.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+
+      {/* Temperature */}
+      <div>
+        <div className="flex justify-between items-center mb-1.5">
+          <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+            <Thermometer className="w-3 h-3" /> Temperature
+          </label>
+          <span className="text-[11px] font-mono bg-muted/80 px-1.5 py-0.5 rounded text-foreground/80">{temperature}</span>
+        </div>
+        <input
+          type="range"
+          min="0" max="2" step="0.1"
+          value={temperature}
+          onChange={e => setTemperature(parseFloat(e.target.value))}
+          className="w-full accent-primary h-1.5"
+        />
+      </div>
+
+      {/* Toggle Switches */}
+      <div className="space-y-0">
+        <div className="flex items-center justify-between py-2.5 border-t border-border">
+          <span className="text-[13px] text-foreground/80">Stream</span>
+          <Switch.Root checked={stream} onCheckedChange={setStream} className="w-9 h-5 bg-muted rounded-full data-[state=checked]:bg-primary transition-colors">
+            <Switch.Thumb className="block w-4 h-4 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px] shadow-sm" />
+          </Switch.Root>
+        </div>
+        <div className="flex items-center justify-between py-2.5 border-t border-border">
+          <span className="text-[13px] text-foreground/80">Markdown</span>
+          <Switch.Root checked={markdownRendering} onCheckedChange={setMarkdownRendering} className="w-9 h-5 bg-muted rounded-full data-[state=checked]:bg-primary transition-colors">
+            <Switch.Thumb className="block w-4 h-4 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px] shadow-sm" />
+          </Switch.Root>
+        </div>
+      </div>
+
+      {/* External Clients */}
+      {externalClients.length > 0 && (
+        <div className="border border-border rounded-lg overflow-hidden">
+          <button
+            onClick={() => setShowExternalClients(!showExternalClients)}
+            className="w-full flex items-center justify-between px-3 py-2 text-[13px] font-medium text-foreground/80 hover:bg-muted/50 transition-colors"
+          >
+            <span className="flex items-center gap-1.5"><Blocks className="w-3.5 h-3.5 text-emerald-500" /> 第三方客户端</span>
+            {showExternalClients ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+          </button>
+          {showExternalClients && (
+            <div className="px-1.5 pb-1.5 space-y-0.5 bg-muted/20">
+              {externalClients.map((client, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => { setActiveClient(client); if (isMobile) setShowMobileSettings(false); }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-muted text-[13px] text-muted-foreground hover:text-foreground transition-colors text-left"
+                >
+                  <span className="text-sm leading-none">{client.icon}</span>
+                  <span>{client.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   // Render External Client Iframe
   if (activeClient) {
     return (
       <div className="flex flex-col h-full animate-in fade-in duration-300">
-        <div className="h-12 bg-card border-b border-border flex items-center justify-between px-4 flex-shrink-0">
-          <div className="flex items-center gap-3">
-            <span className="text-lg">{activeClient.icon}</span>
-            <span className="font-medium text-foreground">{activeClient.name}</span>
-            <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">外部客户端</span>
+        <div className="h-11 bg-card border-b border-border flex items-center justify-between px-4 flex-shrink-0">
+          <div className="flex items-center gap-2.5">
+            <span className="text-base">{activeClient.icon}</span>
+            <span className="font-medium text-sm text-foreground">{activeClient.name}</span>
+            <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">外部客户端</span>
           </div>
           <button
             onClick={() => setActiveClient(null)}
-            className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
+            className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
             title="关闭并返回"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
         <iframe
@@ -547,67 +638,72 @@ export default function Playground() {
 
   return (
     <div
-      className="relative flex h-full animate-in fade-in duration-500 font-sans rounded-2xl overflow-hidden border border-border bg-muted/20 shadow-sm"
+      className="relative flex h-full animate-in fade-in duration-300 font-sans rounded-xl overflow-hidden border border-border bg-background shadow-sm"
       onDragEnter={handleComposerDragEnter}
       onDragOver={handleComposerDragOver}
       onDragLeave={handleComposerDragLeave}
       onDrop={handleComposerDrop}
     >
       {isDraggingFiles ? (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-background/72 backdrop-blur-sm">
-          <div className="mx-6 flex max-w-lg flex-col items-center gap-3 rounded-3xl border border-primary/30 bg-background/95 px-8 py-8 text-center shadow-2xl">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-              <Paperclip className="h-6 w-6" />
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-sm">
+          <div className="mx-6 flex max-w-md flex-col items-center gap-2.5 rounded-2xl border border-primary/20 bg-background/95 px-6 py-6 text-center shadow-xl">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Paperclip className="h-5 w-5" />
             </div>
-            <div className="text-lg font-semibold text-foreground">拖拽到任意区域即可上传附件</div>
-            <div className="text-sm text-muted-foreground">支持图片、PDF、TXT、Markdown、JSON、CSV、XML、YAML，松开鼠标后将自动加入当前对话输入区。</div>
+            <div className="text-base font-semibold text-foreground">拖拽上传附件</div>
+            <div className="text-xs text-muted-foreground leading-relaxed">支持图片、PDF、TXT、Markdown、JSON、CSV、XML、YAML</div>
           </div>
         </div>
       ) : null}
+
       {/* Left: Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-background/60 backdrop-blur-sm border-r border-border">
+      <div className="flex-1 flex flex-col min-w-0">
 
         {/* Chat Header */}
-        <div className="h-14 border-b border-border flex items-center px-4 md:px-6 justify-between bg-background/60 backdrop-blur-sm z-10 flex-shrink-0">
-          <div className="flex items-center gap-2 text-foreground font-bold">
-            <Terminal className="w-5 h-5 text-primary" />
-            <span className="hidden sm:inline">Console Playground</span>
-            <span className="sm:hidden">Playground</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {token ? (
-              <span className="hidden sm:flex items-center gap-1 text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 px-2 py-1 rounded-md border border-emerald-500/20">
-                <CheckCircle2 className="w-3 h-3" />
-                <span className="font-mono">JWT 已登录</span>
-              </span>
-            ) : (
-              <span className="hidden sm:flex items-center gap-1 text-xs bg-red-500/10 text-red-600 dark:text-red-500 px-2 py-1 rounded-md border border-red-500/20">
-                <AlertCircle className="w-3 h-3" /> 未登录
+        <div className="h-11 border-b border-border flex items-center px-3 md:px-5 justify-between bg-background/80 backdrop-blur-sm z-10 flex-shrink-0">
+          <div className="flex items-center gap-2 text-foreground">
+            <Sparkles className="w-4 h-4 text-primary" />
+            <span className="font-semibold text-sm">Playground</span>
+            {isGenerating && (
+              <span className="text-[11px] text-primary flex items-center gap-1 ml-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span className="hidden sm:inline">生成中</span>
               </span>
             )}
-            {isGenerating && <span className="text-xs text-blue-600 dark:text-blue-500 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> <span className="hidden sm:inline">生成中</span></span>}
-            <button onClick={() => setShowMobileSettings(true)} className="md:hidden p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors">
-              <SlidersHorizontal className="w-4 h-4" />
+          </div>
+          <div className="flex items-center gap-1">
+            {token ? (
+              <span className="hidden sm:flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-500 px-1.5 py-0.5 rounded bg-emerald-500/8">
+                <CheckCircle2 className="w-2.5 h-2.5" />
+                <span className="font-mono">已连接</span>
+              </span>
+            ) : (
+              <span className="hidden sm:flex items-center gap-1 text-[10px] text-red-500 px-1.5 py-0.5 rounded bg-red-500/8">
+                <AlertCircle className="w-2.5 h-2.5" /> 未登录
+              </span>
+            )}
+            <button onClick={() => setShowMobileSettings(true)} className="md:hidden p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors">
+              <SlidersHorizontal className="w-3.5 h-3.5" />
             </button>
-            <button onClick={clearChat} className="text-xs text-muted-foreground hover:text-red-500 flex items-center gap-1 transition-colors px-2 py-1 bg-muted rounded-md border border-border">
-              <Trash2 className="w-3 h-3" /> <span className="hidden sm:inline">清空</span>
+            <button onClick={clearChat} className="p-1.5 text-muted-foreground hover:text-red-500 rounded-md hover:bg-muted transition-colors" title="清空对话">
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
 
         {/* Message List */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-10 py-8 space-y-6">
+        <div className="flex-1 overflow-y-auto px-3 md:px-8 py-5 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-              <Sparkles className="w-12 h-12 mb-4 opacity-50" />
-              <h2 className="text-xl font-bold text-foreground mb-2">Zoaholic AI Playground</h2>
-              <p className="text-sm">在右侧选择模型配置参数，开始测试你的 AI 助手。</p>
+              <Sparkles className="w-10 h-10 mb-3 opacity-30" />
+              <h2 className="text-lg font-semibold text-foreground/70 mb-1">AI Playground</h2>
+              <p className="text-xs text-muted-foreground/70">选择模型，开始对话</p>
             </div>
           ) : (
             messages.map((msg, idx) => (
               <div
                 key={idx}
-                className={`flex flex-col max-w-4xl mx-auto w-full group ${
+                className={`flex flex-col max-w-3xl mx-auto w-full group ${
                   msg.role === 'user'
                     ? 'items-end'
                     : msg.role === 'system'
@@ -615,132 +711,130 @@ export default function Playground() {
                       : 'items-start'
                 }`}
               >
-                <div className="flex items-center gap-2 mb-2 text-xs font-medium text-muted-foreground">
+                {/* Role label */}
+                <div className="flex items-center gap-1.5 mb-1 text-[11px] font-medium text-muted-foreground/70">
                   {msg.role === 'user' ? (
-                    <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-500"><MessageSquare className="w-3.5 h-3.5" /> User</span>
+                    <span className="flex items-center gap-1 text-foreground/50"><MessageSquare className="w-3 h-3" /> You</span>
                   ) : msg.role === 'system' ? (
-                    <span className="flex items-center gap-1 text-red-600 dark:text-red-400"><AlertCircle className="w-3.5 h-3.5" /> System</span>
+                    <span className="flex items-center gap-1 text-red-500/70"><AlertCircle className="w-3 h-3" /> System</span>
                   ) : (
-                    <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400"><Brain className="w-3.5 h-3.5" /> {selectedModel || 'Assistant'}</span>
+                    <span className="flex items-center gap-1 text-primary/70"><Brain className="w-3 h-3" /> {selectedModel || 'Assistant'}</span>
                   )}
                 </div>
 
-                <div className={`w-fit max-w-[92%] p-4 rounded-2xl border shadow-sm transition-colors ${
+                {/* Message bubble */}
+                <div className={`w-fit max-w-[90%] px-3.5 py-2.5 rounded-2xl transition-colors ${
                   msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground border-primary/30'
+                    ? 'bg-primary text-primary-foreground'
                     : msg.role === 'system'
-                      ? 'bg-red-500/10 border-red-500/25 text-foreground'
-                      : 'bg-background/50 border-border text-foreground'
+                      ? 'bg-red-500/8 border border-red-500/15 text-foreground'
+                      : 'bg-muted/50 border border-border/60 text-foreground'
                 }`}>
 
+                  {/* Reasoning / Thinking */}
                   {msg.reasoning_content && (
-                    <div className="mb-4 bg-muted/50 border border-border rounded-lg overflow-hidden">
+                    <div className="mb-2.5 rounded-lg overflow-hidden border border-border/50">
                       <button
                         onClick={() => toggleThinking(idx)}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground bg-muted hover:text-foreground transition-colors"
+                        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-muted-foreground bg-muted/60 hover:bg-muted transition-colors"
                       >
-                        <Zap className="w-3.5 h-3.5 text-yellow-500" />
-                        <span>思维链 (Reasoning)</span>
-                        <ChevronDown className={`w-3.5 h-3.5 ml-auto transition-transform ${showThinking[idx] ? 'rotate-180' : ''}`} />
+                        <Zap className="w-3 h-3 text-amber-500" />
+                        <span>Reasoning</span>
+                        <ChevronDown className={`w-3 h-3 ml-auto transition-transform ${showThinking[idx] ? 'rotate-180' : ''}`} />
                       </button>
                       {showThinking[idx] && (
-                        <div className="px-4 py-3 text-sm text-muted-foreground font-mono whitespace-pre-wrap border-t border-border">
+                        <div className="px-3 py-2 text-[12px] text-muted-foreground/80 font-mono whitespace-pre-wrap border-t border-border/50 bg-muted/20 leading-relaxed">
                           {msg.reasoning_content}
                         </div>
                       )}
                     </div>
                   )}
 
+                  {/* Editing mode */}
                   {editingIndex === idx ? (
                     <div className="space-y-2">
                       <textarea
                         value={editValue}
                         onChange={e => setEditValue(e.target.value)}
-                        className="w-full bg-background border border-primary text-foreground p-3 rounded-lg text-sm focus:outline-none min-h-[100px]"
+                        className="w-full bg-background border border-primary/40 text-foreground p-2.5 rounded-lg text-[13px] focus:outline-none min-h-[80px]"
                         autoFocus
                       />
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => setEditingIndex(null)} className="px-3 py-1.5 text-xs bg-muted text-foreground rounded hover:bg-muted/80">取消</button>
-                        <button onClick={() => saveEdit(idx)} className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90">保存{msg.role === 'user' ? '并重发' : ''}</button>
+                      <div className="flex justify-end gap-1.5">
+                        <button onClick={() => setEditingIndex(null)} className="px-2.5 py-1 text-[11px] bg-muted text-foreground rounded-md hover:bg-muted/80">取消</button>
+                        <button onClick={() => saveEdit(idx)} className="px-2.5 py-1 text-[11px] bg-primary text-primary-foreground rounded-md hover:bg-primary/90">保存{msg.role === 'user' ? '并重发' : ''}</button>
                       </div>
                       {msg.attachments?.length ? (
-                        <div className="text-xs text-muted-foreground">
-                          当前消息包含 {msg.attachments.length} 个附件，编辑文本时会保留附件。
+                        <div className="text-[11px] text-muted-foreground">
+                          当前消息包含 {msg.attachments.length} 个附件
                         </div>
                       ) : null}
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                       {msg.content ? (markdownRendering ? (
-                        <div className="text-sm leading-relaxed">
+                        <div className="text-[13.5px] leading-relaxed">
                           <MarkdownRenderer content={msg.content} tone={msg.role === 'user' ? 'inverse' : 'default'} />
-                          {msg.isTyping ? <span className="inline-block w-2 h-4 bg-muted-foreground animate-pulse align-middle" /> : null}
+                          {msg.isTyping ? <span className="inline-block w-1.5 h-3.5 bg-current opacity-60 animate-pulse align-middle ml-0.5" /> : null}
                         </div>
                       ) : (
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                        <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
                           {msg.content}
-                          {msg.isTyping ? <span className="inline-block w-2 h-4 bg-muted-foreground ml-1 animate-pulse align-middle" /> : null}
+                          {msg.isTyping ? <span className="inline-block w-1.5 h-3.5 bg-current opacity-60 ml-0.5 animate-pulse align-middle" /> : null}
                         </div>
                       )) : msg.isTyping ? (
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                          <span className="inline-block w-2 h-4 bg-muted-foreground animate-pulse align-middle" />
+                        <div className="text-[13.5px]">
+                          <span className="inline-block w-1.5 h-3.5 bg-current opacity-60 animate-pulse align-middle" />
                         </div>
                       ) : null}
 
+                      {/* Inline attachments */}
                       {msg.attachments?.length ? (
-                        <div className="space-y-2">
-                          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">附件</div>
-                          <div className="flex flex-wrap gap-2">
-                            {msg.attachments.map(attachment => (
-                              <button
-                                key={attachment.id}
-                                type="button"
-                                onClick={() => openAttachmentPreview(attachment)}
-                                className="max-w-[240px] text-left rounded-xl border border-border bg-background/60 overflow-hidden hover:border-primary/40 hover:bg-background transition-colors"
-                                title="点击预览附件"
-                              >
-                                {attachment.kind === 'image' ? (
-                                  <img src={attachment.dataUrl} alt={attachment.name} className="w-full h-28 object-cover bg-muted" />
-                                ) : null}
-                                <div className="px-3 py-2 text-xs flex items-start gap-2">
-                                  <div className="mt-0.5 text-muted-foreground">{getAttachmentIcon(attachment)}</div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="truncate font-medium text-foreground">{attachment.name}</div>
-                                    <div className="text-muted-foreground truncate">{attachment.mimeType} · {formatAttachmentSize(attachment.size)}</div>
-                                    <div className="text-muted-foreground/80 mt-1 line-clamp-2">{getAttachmentPreviewSummary(attachment)}</div>
-                                  </div>
-                                  <Eye className="w-3.5 h-3.5 text-muted-foreground" />
-                                </div>
-                              </button>
-                            ))}
-                          </div>
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                          {msg.attachments.map(attachment => (
+                            <button
+                              key={attachment.id}
+                              type="button"
+                              onClick={() => openAttachmentPreview(attachment)}
+                              className="flex items-center gap-1.5 max-w-[200px] text-left rounded-lg border border-border/60 bg-background/50 px-2 py-1 text-[11px] hover:border-primary/30 hover:bg-background/80 transition-colors"
+                              title="预览附件"
+                            >
+                              {attachment.kind === 'image' ? (
+                                <img src={attachment.dataUrl} alt={attachment.name} className="w-6 h-6 rounded object-cover bg-muted flex-shrink-0" />
+                              ) : (
+                                <span className="text-muted-foreground flex-shrink-0">{getAttachmentIcon(attachment)}</span>
+                              )}
+                              <span className="truncate text-foreground/70">{attachment.name}</span>
+                              <Eye className="w-2.5 h-2.5 text-muted-foreground/50 flex-shrink-0" />
+                            </button>
+                          ))}
                         </div>
                       ) : null}
                     </div>
                   )}
                 </div>
 
+                {/* Action buttons */}
                 {editingIndex !== idx && !msg.isTyping && (
-                  <div className="flex items-center gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={() => copyMessage(idx, msg.content)} className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors" title="复制">
-                      {copiedIndex === idx ? <CheckCheck className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                  <div className="flex items-center gap-0.5 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button onClick={() => copyMessage(idx, msg.content)} className="p-1 text-muted-foreground/50 hover:text-foreground rounded transition-colors" title="复制">
+                      {copiedIndex === idx ? <CheckCheck className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
                     </button>
-                    <button onClick={() => startEditing(idx, msg.content)} className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors" title="编辑">
-                      <Edit3 className="w-3.5 h-3.5" />
+                    <button onClick={() => startEditing(idx, msg.content)} className="p-1 text-muted-foreground/50 hover:text-foreground rounded transition-colors" title="编辑">
+                      <Edit3 className="w-3 h-3" />
                     </button>
-                    <button onClick={() => retryMessage(idx)} className="p-1.5 text-muted-foreground hover:text-blue-500 rounded-md hover:bg-muted transition-colors" title={msg.role === 'user' ? '重发此消息' : '重新生成'}>
-                      <RefreshCw className="w-3.5 h-3.5" />
+                    <button onClick={() => retryMessage(idx)} className="p-1 text-muted-foreground/50 hover:text-primary rounded transition-colors" title={msg.role === 'user' ? '重发' : '重新生成'}>
+                      <RefreshCw className="w-3 h-3" />
                     </button>
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
-                        <button className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted transition-colors">
-                          <MoreVertical className="w-3.5 h-3.5" />
+                        <button className="p-1 text-muted-foreground/50 hover:text-foreground rounded transition-colors">
+                          <MoreVertical className="w-3 h-3" />
                         </button>
                       </DropdownMenu.Trigger>
                       <DropdownMenu.Portal>
-                        <DropdownMenu.Content className="min-w-[120px] bg-card border border-border rounded-md shadow-xl p-1 z-50 text-sm">
-                          <DropdownMenu.Item onClick={() => deleteMessage(idx)} className="flex items-center gap-2 px-2 py-1.5 text-red-500 hover:bg-red-500/10 rounded cursor-pointer outline-none">
-                            <Trash2 className="w-3.5 h-3.5" /> 删除以下所有
+                        <DropdownMenu.Content className="min-w-[100px] bg-card border border-border rounded-lg shadow-xl p-0.5 z-50 text-[12px]">
+                          <DropdownMenu.Item onClick={() => deleteMessage(idx)} className="flex items-center gap-1.5 px-2.5 py-1.5 text-red-500 hover:bg-red-500/8 rounded cursor-pointer outline-none">
+                            <Trash2 className="w-3 h-3" /> 删除以下
                           </DropdownMenu.Item>
                         </DropdownMenu.Content>
                       </DropdownMenu.Portal>
@@ -750,132 +844,128 @@ export default function Playground() {
               </div>
             ))
           )}
-          <div ref={messagesEndRef} className="h-4" />
+          <div ref={messagesEndRef} className="h-2" />
         </div>
 
         {/* Input Area */}
-        <div className="p-4 md:px-10 bg-background/60 backdrop-blur-sm border-t border-border flex-shrink-0">
-          <div className="max-w-4xl mx-auto bg-muted border border-border focus-within:border-primary rounded-xl overflow-hidden transition-colors">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.xml,.yaml,.yml"
-              className="hidden"
-              onChange={handleAttachmentSelect}
-            />
-
-            {pendingAttachments.length ? (
-              <div className="px-4 pt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                {pendingAttachments.map(attachment => (
-                  <div key={attachment.id} className="rounded-xl border border-border bg-background/80 overflow-hidden">
-                    {attachment.kind === 'image' ? <img src={attachment.dataUrl} alt={attachment.name} className="w-full h-28 object-cover bg-muted" /> : null}
-                    <div className="px-3 py-2 space-y-2 text-xs text-foreground">
-                      <div className="flex items-start gap-2">
-                        <span className="mt-0.5 text-muted-foreground">{getAttachmentIcon(attachment)}</span>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-medium">{attachment.name}</div>
-                          <div className="text-muted-foreground truncate">{attachment.mimeType} · {formatAttachmentSize(attachment.size)}</div>
-                          <div className="text-muted-foreground/80 mt-1 line-clamp-2">{getAttachmentPreviewSummary(attachment)}</div>
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openAttachmentPreview(attachment)}
-                          className="px-2.5 py-1 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex items-center gap-1"
-                        >
-                          <Eye className="w-3.5 h-3.5" /> 预览
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removePendingAttachment(attachment.id)}
-                          className="px-2.5 py-1 rounded-md border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-colors flex items-center gap-1"
-                        >
-                          <X className="w-3.5 h-3.5" /> 移除
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {attachmentError ? (
-              <div className="px-4 pt-3 text-xs text-red-500">{attachmentError}</div>
-            ) : null}
-
-            <div className="relative transition-colors">
-              <textarea
-                ref={textareaRef}
-                value={inputValue}
-                onChange={e => {
-                  setInputValue(e.target.value);
-                  e.target.style.height = 'auto';
-                  e.target.style.height = `${Math.min(e.target.scrollHeight, 200)}px`;
-                }}
-                onKeyDown={handleKeyDown}
-                placeholder={token ? "输入消息，可附加图片/PDF/文本附件..." : "请先登录..."}
-                disabled={!token || isGenerating}
-                className="w-full bg-transparent text-foreground p-4 pl-14 pr-12 text-sm max-h-[200px] resize-none focus:outline-none placeholder:text-muted-foreground disabled:opacity-50"
-                rows={1}
+        <div className="px-3 md:px-8 pb-3 pt-2 bg-background/80 backdrop-blur-sm border-t border-border/50 flex-shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="bg-muted/40 border border-border/60 focus-within:border-primary/40 rounded-xl overflow-hidden transition-colors">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.pdf,.txt,.md,.markdown,.json,.csv,.xml,.yaml,.yml"
+                className="hidden"
+                onChange={handleAttachmentSelect}
               />
 
-              <button
-                onClick={openFilePicker}
-                disabled={!token || isGenerating || pendingAttachments.length >= MAX_PLAYGROUND_ATTACHMENT_COUNT}
-                className="absolute left-3 bottom-3 p-2 text-muted-foreground hover:text-foreground hover:bg-background/80 rounded-lg disabled:opacity-50 transition-colors"
-                title="上传附件"
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
+              {/* Pending attachments - compact inline pills */}
+              {pendingAttachments.length ? (
+                <div className="px-3 pt-2.5 flex flex-wrap gap-1.5">
+                  {pendingAttachments.map(attachment => (
+                    <div key={attachment.id} className="flex items-center gap-1.5 bg-background/70 border border-border/50 rounded-lg pl-2 pr-1 py-1 text-[11px]">
+                      {attachment.kind === 'image' ? (
+                        <img src={attachment.dataUrl} alt={attachment.name} className="w-5 h-5 rounded object-cover bg-muted" />
+                      ) : (
+                        <span className="text-muted-foreground">{getAttachmentIcon(attachment)}</span>
+                      )}
+                      <span className="truncate max-w-[100px] text-foreground/70">{attachment.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => openAttachmentPreview(attachment)}
+                        className="p-0.5 text-muted-foreground/50 hover:text-foreground rounded transition-colors"
+                      >
+                        <Eye className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removePendingAttachment(attachment.id)}
+                        className="p-0.5 text-muted-foreground/50 hover:text-red-500 rounded transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
 
-              <button
-                onClick={handleSend}
-                disabled={(!inputValue.trim() && pendingAttachments.length === 0) || isGenerating || !token}
-                className="absolute right-3 bottom-3 p-2 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg disabled:opacity-50 disabled:hover:bg-primary transition-all shadow-md"
-              >
-                {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              </button>
+              {attachmentError ? (
+                <div className="px-3 pt-2 text-[11px] text-red-500">{attachmentError}</div>
+              ) : null}
+
+              <div className="relative">
+                <textarea
+                  ref={textareaRef}
+                  value={inputValue}
+                  onChange={e => {
+                    setInputValue(e.target.value);
+                    e.target.style.height = 'auto';
+                    e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder={token ? "输入消息... (Shift+Enter 换行)" : "请先登录..."}
+                  disabled={!token || isGenerating}
+                  className="w-full bg-transparent text-foreground py-2.5 pl-10 pr-10 text-[13px] max-h-[160px] resize-none focus:outline-none placeholder:text-muted-foreground/50 disabled:opacity-40"
+                  rows={1}
+                />
+
+                <button
+                  onClick={openFilePicker}
+                  disabled={!token || isGenerating || pendingAttachments.length >= MAX_PLAYGROUND_ATTACHMENT_COUNT}
+                  className="absolute left-2 bottom-2 p-1.5 text-muted-foreground/50 hover:text-foreground rounded-md disabled:opacity-30 transition-colors"
+                  title="上传附件"
+                >
+                  <Paperclip className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  onClick={handleSend}
+                  disabled={(!inputValue.trim() && pendingAttachments.length === 0) || isGenerating || !token}
+                  className="absolute right-2 bottom-2 p-1.5 bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg disabled:opacity-30 disabled:hover:bg-primary transition-all"
+                >
+                  {isGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                </button>
+              </div>
             </div>
-          </div>
-          <div className="max-w-4xl mx-auto mt-2 text-xs text-muted-foreground flex justify-between">
-            <span>Shift + Enter 换行，支持图片 / PDF / 文本附件，也支持拖拽上传</span>
-            <span>已启用 {stream ? '流式输出' : '非流式输出'}</span>
+            <div className="flex justify-between mt-1 px-0.5 text-[10px] text-muted-foreground/40">
+              <span>支持附件拖拽上传</span>
+              <span>{stream ? '流式' : '非流式'}</span>
+            </div>
           </div>
         </div>
       </div>
 
-
+      {/* Attachment Preview Dialog */}
       <Dialog.Root open={Boolean(previewAttachment)} onOpenChange={open => { if (!open) setPreviewAttachment(null); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,960px)] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-2xl border border-border bg-background shadow-2xl">
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,900px)] max-h-[85vh] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl border border-border bg-background shadow-2xl">
             {previewAttachment ? (
               <>
-                <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+                <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
                   <div className="min-w-0">
-                    <Dialog.Title className="text-base font-semibold text-foreground truncate">{previewAttachment.name}</Dialog.Title>
-                    <div className="text-xs text-muted-foreground mt-1">
+                    <Dialog.Title className="text-sm font-semibold text-foreground truncate">{previewAttachment.name}</Dialog.Title>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">
                       {previewAttachment.mimeType} · {formatAttachmentSize(previewAttachment.size)}
                     </div>
                   </div>
-                  <Dialog.Close className="rounded-lg p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+                  <Dialog.Close className="rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
                     <X className="w-4 h-4" />
                   </Dialog.Close>
                 </div>
 
-                <div className="max-h-[calc(85vh-74px)] overflow-auto p-5 bg-muted/20">
+                <div className="max-h-[calc(85vh-60px)] overflow-auto p-4 bg-muted/10">
                   {previewAttachment.kind === 'image' ? (
-                    <img src={previewAttachment.dataUrl} alt={previewAttachment.name} className="max-w-full max-h-[70vh] mx-auto rounded-xl border border-border bg-background object-contain" />
+                    <img src={previewAttachment.dataUrl} alt={previewAttachment.name} className="max-w-full max-h-[70vh] mx-auto rounded-lg border border-border bg-background object-contain" />
                   ) : previewAttachment.mimeType === 'application/pdf' ? (
                     <iframe
                       src={previewAttachment.dataUrl}
                       title={previewAttachment.name}
-                      className="w-full h-[70vh] rounded-xl border border-border bg-background"
+                      className="w-full h-[70vh] rounded-lg border border-border bg-background"
                     />
                   ) : (
-                    <pre className="whitespace-pre-wrap break-words rounded-xl border border-border bg-background p-4 text-sm text-foreground font-mono">
+                    <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-background p-3 text-[12px] text-foreground font-mono leading-relaxed">
                       {previewAttachment.previewText || decodeAttachmentText(previewAttachment.dataUrl)}
                     </pre>
                   )}
@@ -886,107 +976,14 @@ export default function Playground() {
         </Dialog.Portal>
       </Dialog.Root>
 
-
-      {/* Right: Parameters Panel */}
-      <div className="w-80 bg-background/40 backdrop-blur-sm border-l border-border flex-shrink-0 flex-col hidden md:flex h-full">
-        <div className="h-14 border-b border-border flex items-center px-4 font-medium text-foreground gap-2 flex-shrink-0 bg-background/40 backdrop-blur-sm">
-          <Settings2 className="w-4 h-4 text-primary" />
-          控制台参数
+      {/* Right: Parameters Panel (Desktop) */}
+      <div className="w-64 bg-muted/10 border-l border-border flex-shrink-0 flex-col hidden md:flex h-full">
+        <div className="h-11 border-b border-border flex items-center px-3 gap-1.5 flex-shrink-0 text-[13px] font-medium text-foreground/80">
+          <Settings2 className="w-3.5 h-3.5 text-primary" />
+          参数
         </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-6">
-
-          {/* System Prompt */}
-          <div className="space-y-2">
-            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5"><Brain className="w-3.5 h-3.5" /> System Prompt</label>
-            <textarea
-              value={systemPrompt}
-              onChange={e => setSystemPrompt(e.target.value)}
-              placeholder="你是一个有帮助的 AI 助手..."
-              className="w-full bg-muted border border-border focus:border-primary p-3 rounded-lg text-sm text-foreground h-24 resize-none outline-none transition-colors"
-            />
-          </div>
-
-          {/* Model Selection */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Model</label>
-              <button onClick={fetchModels} className={`text-muted-foreground hover:text-primary ${loadingModels ? 'animate-spin' : ''}`} title="刷新模型列表">
-                <RefreshCw className="w-3 h-3" />
-              </button>
-            </div>
-            <select
-              value={selectedModel}
-              onChange={e => setSelectedModel(e.target.value)}
-              className="w-full bg-muted border border-border focus:border-primary px-3 py-2 rounded-lg text-sm text-foreground outline-none"
-            >
-              <option value="" disabled>选择模型...</option>
-              {models.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-
-          {/* Temperature */}
-          <div className="space-y-4 pt-2">
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1"><Thermometer className="w-3.5 h-3.5" /> Temperature</label>
-                <span className="text-xs font-mono bg-muted px-1.5 py-0.5 rounded text-foreground">{temperature}</span>
-              </div>
-              <input
-                type="range"
-                min="0" max="2" step="0.1"
-                value={temperature}
-                onChange={e => setTemperature(parseFloat(e.target.value))}
-                className="w-full accent-primary"
-              />
-            </div>
-          </div>
-
-          {/* Stream Switch */}
-          <div className="flex items-center justify-between py-2 border-t border-b border-border">
-            <span className="text-sm font-medium text-foreground">Stream Output</span>
-            <Switch.Root checked={stream} onCheckedChange={setStream} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary transition-colors">
-              <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
-            </Switch.Root>
-          </div>
-
-          <div className="flex items-center justify-between py-2 border-b border-border">
-            <span className="text-sm font-medium text-foreground">Markdown 渲染</span>
-            <Switch.Root checked={markdownRendering} onCheckedChange={setMarkdownRendering} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary transition-colors">
-              <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
-            </Switch.Root>
-          </div>
-
-          {/* External Clients Accordion */}
-          <div className="border border-border rounded-lg bg-muted/50 overflow-hidden">
-            <button
-              onClick={() => setShowExternalClients(!showExternalClients)}
-              className="w-full flex items-center justify-between p-3 text-sm font-medium text-foreground hover:bg-muted transition-colors"
-            >
-              <span className="flex items-center gap-1.5"><Blocks className="w-4 h-4 text-emerald-500" /> 第三方客户端</span>
-              {showExternalClients ? <ChevronDown className="w-4 h-4 text-muted-foreground" /> : <ChevronRight className="w-4 h-4 text-muted-foreground" />}
-            </button>
-            {showExternalClients && (
-              <div className="p-2 space-y-1 bg-background">
-                {externalClients.map((client, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => setActiveClient(client)}
-                    className="w-full flex items-center justify-between p-2 rounded-md hover:bg-muted text-sm text-muted-foreground hover:text-foreground transition-colors text-left"
-                  >
-                    <span className="flex items-center gap-2">
-                      <span className="text-base leading-none">{client.icon}</span>
-                      <span>{client.name}</span>
-                    </span>
-                  </button>
-                ))}
-                <div className="text-xs text-muted-foreground px-2 pt-2 border-t border-border mt-2">
-                  点击将在当前页面内嵌显示第三方客户端
-                </div>
-              </div>
-            )}
-          </div>
-
+        <div className="flex-1 overflow-y-auto p-3">
+          <SettingsPanel />
         </div>
       </div>
 
@@ -994,108 +991,25 @@ export default function Playground() {
       <Dialog.Root open={showMobileSettings} onOpenChange={setShowMobileSettings}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40" />
-          <Dialog.Content className="fixed bottom-0 left-0 right-0 bg-background border-t border-border rounded-t-2xl z-50 max-h-[80vh] overflow-y-auto animate-in slide-in-from-bottom duration-300">
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <Dialog.Title className="text-lg font-bold text-foreground flex items-center gap-2">
-                <Settings2 className="w-5 h-5 text-primary" /> 参数配置
+          <Dialog.Content className="fixed bottom-0 left-0 right-0 bg-background border-t border-border rounded-t-2xl z-50 max-h-[75vh] overflow-y-auto animate-in slide-in-from-bottom duration-300">
+            <div className="p-3 border-b border-border flex items-center justify-between">
+              <Dialog.Title className="text-sm font-semibold text-foreground flex items-center gap-2">
+                <Settings2 className="w-4 h-4 text-primary" /> 参数配置
               </Dialog.Title>
               <Dialog.Close className="p-1 text-muted-foreground hover:text-foreground">
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </Dialog.Close>
             </div>
-            <div className="p-4 space-y-5">
+            <div className="p-4">
               {/* Auth Status */}
-              <div className={`p-3 rounded-lg flex items-center gap-2 ${token ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-red-500/10 border border-red-500/20'}`}>
+              <div className={`p-2.5 rounded-lg flex items-center gap-2 mb-4 text-[13px] ${token ? 'bg-emerald-500/8 border border-emerald-500/15' : 'bg-red-500/8 border border-red-500/15'}`}>
                 {token ? (
-                  <><CheckCircle2 className="w-4 h-4 text-emerald-500" /><span className="text-sm text-emerald-600 dark:text-emerald-400">已登录（JWT）</span></>
+                  <><CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /><span className="text-emerald-600 dark:text-emerald-400">已登录</span></>
                 ) : (
-                  <><AlertCircle className="w-4 h-4 text-red-500" /><span className="text-sm text-red-600 dark:text-red-400">未登录，请先登录</span></>
+                  <><AlertCircle className="w-3.5 h-3.5 text-red-500" /><span className="text-red-600 dark:text-red-400">未登录</span></>
                 )}
               </div>
-
-              {/* System Prompt */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-muted-foreground uppercase">System Prompt</label>
-                <textarea
-                  value={systemPrompt}
-                  onChange={e => setSystemPrompt(e.target.value)}
-                  placeholder="你是一个有帮助的 AI 助手..."
-                  className="w-full bg-muted border border-border p-3 rounded-lg text-sm text-foreground h-20 resize-none outline-none"
-                />
-              </div>
-
-              {/* Model Selection */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Model</label>
-                  <button onClick={fetchModels} className={`text-muted-foreground hover:text-primary ${loadingModels ? 'animate-spin' : ''}`}>
-                    <RefreshCw className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <select
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                  className="w-full bg-muted border border-border px-3 py-2.5 rounded-lg text-sm text-foreground outline-none"
-                >
-                  <option value="" disabled>选择模型...</option>
-                  {models.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-
-              {/* Temperature */}
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-xs font-semibold text-muted-foreground uppercase">Temperature</label>
-                  <span className="text-xs font-mono bg-muted px-1.5 py-0.5 rounded text-foreground">{temperature}</span>
-                </div>
-                <input
-                  type="range"
-                  min="0" max="2" step="0.1"
-                  value={temperature}
-                  onChange={e => setTemperature(parseFloat(e.target.value))}
-                  className="w-full accent-primary"
-                />
-              </div>
-
-              {/* Stream Switch */}
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm font-medium text-foreground">Stream Output</span>
-                <Switch.Root checked={stream} onCheckedChange={setStream} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary">
-                  <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
-                </Switch.Root>
-              </div>
-
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm font-medium text-foreground">Markdown 渲染</span>
-                <Switch.Root checked={markdownRendering} onCheckedChange={setMarkdownRendering} className="w-11 h-6 bg-muted rounded-full data-[state=checked]:bg-primary">
-                  <Switch.Thumb className="block w-5 h-5 bg-white rounded-full transition-transform translate-x-0.5 data-[state=checked]:translate-x-[22px]" />
-                </Switch.Root>
-              </div>
-
-              {/* Third-party Clients */}
-              <div className="border border-border rounded-lg overflow-hidden">
-                <button
-                  onClick={() => setShowExternalClients(!showExternalClients)}
-                  className="w-full flex items-center justify-between p-3 text-sm font-medium text-foreground bg-muted"
-                >
-                  <span className="flex items-center gap-1.5"><Blocks className="w-4 h-4 text-emerald-500" /> 第三方客户端</span>
-                  {showExternalClients ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                </button>
-                {showExternalClients && (
-                  <div className="p-2 space-y-1">
-                    {externalClients.map((client, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => { setActiveClient(client); setShowMobileSettings(false); }}
-                        className="w-full flex items-center gap-2 p-2 rounded-md hover:bg-muted text-sm text-muted-foreground hover:text-foreground text-left"
-                      >
-                        <span className="text-base">{client.icon}</span>
-                        <span>{client.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <SettingsPanel isMobile />
             </div>
           </Dialog.Content>
         </Dialog.Portal>
