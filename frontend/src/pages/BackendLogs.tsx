@@ -12,6 +12,8 @@ import {
   ArrowDown,
   Save,
   Settings2,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 interface BackendLogEntry {
@@ -67,10 +69,17 @@ export default function BackendLogs() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [bufferSize, setBufferSize] = useState(DEFAULT_BUFFER_SIZE);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [showConfig, setShowConfig] = useState(false);
   const [total, setTotal] = useState(0);
   const [maxId, setMaxId] = useState(0);
   const [effectiveBufferSize, setEffectiveBufferSize] = useState(DEFAULT_BUFFER_SIZE);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollToBottomRef = useRef(false);
+
+  const scrollToBottom = () => {
+    if (!scrollerRef.current) return;
+    scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+  };
 
   const fetchBackendLogSettings = async () => {
     if (!token) return;
@@ -91,10 +100,11 @@ export default function BackendLogs() {
     }
   };
 
-  const fetchBackendLogs = async () => {
+  const fetchBackendLogs = async ({ scrollAfterLoad = false }: { scrollAfterLoad?: boolean } = {}) => {
     if (!token) return;
     setLoading(true);
     setError('');
+    pendingScrollToBottomRef.current = scrollAfterLoad;
 
     try {
       const queryParams = new URLSearchParams({
@@ -116,6 +126,7 @@ export default function BackendLogs() {
       setMaxId(data.max_id || 0);
       setEffectiveBufferSize(data.buffer_size || bufferSize);
     } catch (err) {
+      pendingScrollToBottomRef.current = false;
       setError(err instanceof Error ? err.message : '获取后台日志失败');
     } finally {
       setLoading(false);
@@ -159,8 +170,6 @@ export default function BackendLogs() {
         throw new Error(data.detail || `保存失败 (${res.status})`);
       }
 
-      setPageSize(normalizedPageSize);
-      setBufferSize(normalizedBufferSize);
       setConfigMessage('显示配置已保存到服务端');
       await fetchBackendLogs();
     } catch (err) {
@@ -175,46 +184,63 @@ export default function BackendLogs() {
   }, [token]);
 
   useEffect(() => {
-    fetchBackendLogs();
+    fetchBackendLogs({ scrollAfterLoad: true });
   }, [token, search, streamFilter, pageSize]);
 
   useEffect(() => {
     if (!autoRefresh || !token) return;
     const timer = window.setInterval(() => {
-      fetchBackendLogs();
+      fetchBackendLogs({ scrollAfterLoad: false });
     }, POLL_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
   }, [autoRefresh, token, search, streamFilter, pageSize]);
 
   useEffect(() => {
-    if (!scrollerRef.current) return;
-    scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+    if (!pendingScrollToBottomRef.current) return;
+    scrollToBottom();
+    pendingScrollToBottomRef.current = false;
   }, [items]);
 
   const isBufferSmallerThanPage = bufferSize < pageSize;
 
   return (
-    <div className="space-y-4 sm:space-y-6 animate-in fade-in duration-500 h-full flex flex-col pb-12">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 flex-shrink-0">
-        <div>
+    <div className="h-full min-h-0 min-w-0 flex flex-col gap-4 sm:gap-6 animate-in fade-in duration-500">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between flex-shrink-0">
+        <div className="min-w-0">
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground">后台日志</h1>
           <p className="text-muted-foreground mt-1 text-sm sm:text-base">
             查看当前实例的 stdout / stderr 输出，适合 Render、Railway 等平台快速排查部署日志。
           </p>
         </div>
 
-        <button
-          onClick={fetchBackendLogs}
-          className="inline-flex items-center justify-center gap-2 px-3 py-2 bg-card border border-border rounded-lg text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          立即刷新
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => setAutoRefresh(prev => !prev)}
+            className={`inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors ${
+              autoRefresh
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'bg-card text-foreground border-border hover:bg-muted'
+            }`}
+          >
+            {autoRefresh ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            {autoRefresh ? '自动刷新中' : '自动刷新已暂停'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fetchBackendLogs({ scrollAfterLoad: true })}
+            title="立即刷新"
+            className="inline-flex items-center justify-center rounded-lg p-2 bg-card border border-border text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
 
-      <div className="bg-card border border-border rounded-xl shadow-sm p-3 sm:p-4 space-y-3 flex-shrink-0">
-        <div className="rounded-lg border border-border bg-muted/30 px-3 py-3 space-y-3">
+      {showConfig && (
+        <div className="rounded-lg border border-border bg-muted/30 px-3 py-3 space-y-3 flex-shrink-0">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
             <div>
               <div className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
@@ -277,9 +303,11 @@ export default function BackendLogs() {
             </div>
           )}
         </div>
+      )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
-          <label className="space-y-1">
+      <div className="bg-card border border-border rounded-xl shadow-sm p-3 sm:p-4 space-y-3 flex-shrink-0">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <label className="space-y-1 md:col-span-2">
             <span className="text-xs font-medium text-muted-foreground">关键字筛选</span>
             <div className="relative">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -305,32 +333,17 @@ export default function BackendLogs() {
               <option value="stderr">仅 stderr</option>
             </select>
           </label>
-
-          <div className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">自动刷新</span>
-            <button
-              type="button"
-              onClick={() => setAutoRefresh(prev => !prev)}
-              className={`w-full inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm border transition-colors ${
-                autoRefresh
-                  ? 'bg-primary text-primary-foreground border-primary'
-                  : 'bg-background text-foreground border-border hover:bg-muted'
-              }`}
-            >
-              {autoRefresh ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              {autoRefresh ? '已开启（3 秒）' : '已暂停'}
-            </button>
-          </div>
-
-          <div className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">当前查询</span>
-            <div className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground">
-              {pageSize} 行 / 页
-            </div>
-          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => setShowConfig(prev => !prev)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted border border-border hover:bg-muted/80 transition-colors"
+          >
+            {showConfig ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            显示配置
+          </button>
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted border border-border">
             <Server className="w-3.5 h-3.5" /> 当前结果 {items.length} 行
           </span>
@@ -344,7 +357,7 @@ export default function BackendLogs() {
             <Server className="w-3.5 h-3.5" /> 后端当前保留 {effectiveBufferSize} 行
           </span>
           <span className="text-[11px] opacity-80">
-            日志保存在当前进程内存中，应用重启或切换实例后会重新开始计数。
+            自动刷新不会自动跳到最新一行，避免打断阅读。
           </span>
         </div>
 
@@ -356,7 +369,7 @@ export default function BackendLogs() {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 bg-card border border-border rounded-xl overflow-hidden">
+      <div className="flex-1 min-h-0 min-w-0 bg-card border border-border rounded-xl overflow-hidden flex flex-col">
         {items.length === 0 && !loading ? (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground px-6 py-16 text-center">
             <Terminal className="w-12 h-12 mb-4 opacity-50" />
@@ -364,14 +377,14 @@ export default function BackendLogs() {
             <p className="text-xs mt-2 opacity-80">可尝试切换筛选条件，或等待应用产生新的 stdout / stderr 输出。</p>
           </div>
         ) : (
-          <div ref={scrollerRef} className="h-full overflow-auto bg-background/60">
-            <div className="min-w-full font-mono text-xs">
+          <div ref={scrollerRef} className="flex-1 min-h-0 overflow-auto bg-background/60">
+            <div className="w-full min-w-0 font-mono text-xs">
               {items.map(item => {
                 const isErrorStream = item.stream === 'stderr';
                 return (
                   <div
                     key={item.id}
-                    className={`grid grid-cols-[120px_78px_minmax(0,1fr)] gap-3 px-3 py-2 border-b border-border/60 hover:bg-muted/40 ${
+                    className={`grid grid-cols-1 sm:grid-cols-[120px_78px_minmax(0,1fr)] gap-2 sm:gap-3 px-3 py-2 border-b border-border/60 hover:bg-muted/40 ${
                       isErrorStream ? 'bg-red-500/5' : ''
                     }`}
                   >
@@ -387,7 +400,7 @@ export default function BackendLogs() {
                         {item.stream}
                       </span>
                     </div>
-                    <div className="text-foreground whitespace-pre-wrap break-words leading-5">{item.message}</div>
+                    <div className="text-foreground whitespace-pre-wrap break-words leading-5 min-w-0">{item.message}</div>
                   </div>
                 );
               })}
