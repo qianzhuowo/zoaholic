@@ -10,6 +10,8 @@
 - 在方言模块中定义 endpoints 即可自动注册路由
 """
 
+import os
+
 from .registry import (
     DialectDefinition,
     EndpointDefinition,
@@ -30,17 +32,27 @@ from . import openai_responses as openai_responses_dialect
 from . import gemini as gemini_dialect
 from . import claude as claude_dialect
 
-# 调用 register() 完成注册
-openai_dialect.register()
-openai_responses_dialect.register()
-gemini_dialect.register()
-claude_dialect.register()
+# 调用 register() 完成注册（幂等保护，便于测试/热重载场景重复导入）
+if not get_dialect("openai"):
+    openai_dialect.register()
+
+if not get_dialect("openai-responses"):
+    openai_responses_dialect.register()
+
+if not get_dialect("gemini"):
+    gemini_dialect.register()
+
+if not get_dialect("claude"):
+    claude_dialect.register()
 
 # 导入路由模块并注册路由
-from .router import dialect_router, register_dialect_routes
+dialect_router = None
+register_dialect_routes = None
+if os.getenv("ZOAHOLIC_SKIP_DIALECT_ROUTE_REGISTRATION") != "1":
+    from .router import dialect_router, register_dialect_routes
 
-# 自动注册所有方言路由
-register_dialect_routes()
+    # 自动注册所有方言路由
+    register_dialect_routes()
 
 __all__ = [
     "DialectDefinition",

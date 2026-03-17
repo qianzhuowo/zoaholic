@@ -4,6 +4,7 @@ Streaming response helpers.
 提供带统计和错误处理的流式响应包装器。
 """
 
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import asyncio
 from time import time
@@ -108,6 +109,120 @@ class LoggingStreamingResponse(Response):
             except Exception as e:
                 logger.error(f"Error updating stats in LoggingStreamingResponse: {str(e)}")
 
+    def _split_complete_stream_lines(self, buffer: str, chunk_text: str) -> Tuple[List[str], str]:
+        """
+        将流式文本切分为完整行，并保留跨 chunk 的残留数据。
+
+        说明：
+        - 仅输出已遇到换行符的完整行
+        - 未结束的最后一行保留到下一次 chunk 再解析
+        - 统一兼容 \n / \r\n
+        """
+        combined = buffer + chunk_text
+        if not combined:
+            return [], ""
+
+        lines: List[str] = []
+        start = 0
+
+        for idx, char in enumerate(combined):
+            if char == "\n":
+                line = combined[start:idx]
+                if line.endswith("\r"):
+                    line = line[:-1]
+                lines.append(line)
+                start = idx + 1
+
+        return lines, combined[start:]
+
+    def _extract_sse_payload(self, line: str) -> Optional[str]:
+        """从单行 SSE 数据中提取 JSON payload。"""
+        stripped = line.strip()
+
+        # 跳过空行、注释行、事件名行
+        if not stripped or stripped.startswith(":") or stripped.startswith("event:"):
+            return None
+
+        if stripped.startswith("data:"):
+            stripped = stripped[5:].strip()
+
+        if not stripped or stripped.startswith("[DONE]") or stripped.startswith("OK"):
+            return None
+
+        return stripped
+
+    def _extract_usage_info(self, resp: Dict[str, Any]) -> Optional[Dict[str, int]]:
+        """按当前方言优先、OpenAI 保底的顺序提取 usage。"""
+        from core.dialects.registry import get_dialect
+
+        d_id = self.dialect_id or self.current_info.get("dialect_id") or "openai"
+        dialect = get_dialect(d_id)
+
+        usage_info = None
+        if dialect and dialect.parse_usage:
+            usage_info = dialect.parse_usage(resp)
+
+        # 某些链路会先转换为 Canonical(OpenAI 风格)，这里用 openai 兜底
+        if not usage_info and d_id != "openai":
+            o_dialect = get_dialect("openai")
+            if o_dialect and o_dialect.parse_usage:
+                usage_info = o_dialect.parse_usage(resp)
+
+        return usage_info
+
+    def _merge_usage_info(self, usage_info: Optional[Dict[str, int]]) -> None:
+        """
+        以“非零覆盖 + 补全”的方式合并 usage，避免分阶段上报时互相覆盖。
+        """
+        if not usage_info:
+            return
+
+        old_prompt = int(self.current_info.get("prompt_tokens") or 0)
+        old_completion = int(self.current_info.get("completion_tokens") or 0)
+        old_total = int(self.current_info.get("total_tokens") or 0)
+
+        new_prompt = int(usage_info.get("prompt_tokens") or 0)
+        new_completion = int(usage_info.get("completion_tokens") or 0)
+        new_total = int(usage_info.get("total_tokens") or 0)
+
+        prompt_tokens = new_prompt if new_prompt > 0 else old_prompt
+        completion_tokens = new_completion if new_completion > 0 else old_completion
+
+        # total_tokens 优先使用新值；若新值缺失或偏小，则用已知 prompt/completion 补全
+        total_tokens = new_total if new_total > 0 else old_total
+        derived_total = prompt_tokens + completion_tokens
+        if derived_total > 0 and derived_total > total_tokens:
+            total_tokens = derived_total
+
+        self.current_info["prompt_tokens"] = prompt_tokens
+        self.current_info["completion_tokens"] = completion_tokens
+        self.current_info["total_tokens"] = total_tokens
+
+    async def _process_stream_line(self, line: str, content_start_recorded: bool) -> bool:
+        """解析单行 SSE/JSON 数据，更新正文开始时间与 usage 统计。"""
+        payload = self._extract_sse_payload(line)
+        if not payload:
+            return content_start_recorded
+
+        try:
+            resp = await asyncio.to_thread(json.loads, payload)
+
+            if not content_start_recorded:
+                choices = resp.get("choices")
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    content = safe_get(choices[0], "delta", "content", default=None)
+                    if content and content.strip():
+                        self.current_info["content_start_time"] = time() - self.current_info.get("start_time", time())
+                        content_start_recorded = True
+
+            usage_info = self._extract_usage_info(resp)
+            self._merge_usage_info(usage_info)
+        except Exception as e:
+            if self.debug:
+                logger.error(f"Error parsing streaming response: {str(e)}, line: {repr(payload)}")
+
+        return content_start_recorded
+
     async def _logging_iterator(self):
         # 用于收集响应体的缓冲区（仅在配置了保留时间时使用）
         # response_chunks 用于收集返回给用户的响应（即经过转换后的）
@@ -116,6 +231,7 @@ class LoggingStreamingResponse(Response):
         total_response_size = 0
         should_save_response = self.current_info.get("raw_data_expires_at") is not None
         content_start_recorded = False  # 标记是否已记录正文开始时间
+        line_buffer = ""
         
         async for chunk in self.body_iterator:
             if isinstance(chunk, str):
@@ -136,65 +252,16 @@ class LoggingStreamingResponse(Response):
             if self.debug:
                 logger.info(chunk_text.encode("utf-8").decode("unicode_escape"))
 
-            # 按行分割处理，一个 chunk 可能包含多个 SSE 事件
-            lines = chunk_text.split("\n")
+            # 使用行缓冲区处理跨 chunk 拆分的 SSE 数据
+            lines, line_buffer = self._split_complete_stream_lines(line_buffer, chunk_text)
             for line in lines:
-                line = line.strip()
-                
-                # 跳过空行和注释行
-                if not line or line.startswith(":"):
-                    continue
-
-                if line.startswith("data:"):
-                    line = line[5:].strip()  # 移除 "data:" 前缀（5个字符）
-
-                # 跳过特殊标记和空行
-                if not line or line.startswith("[DONE]") or line.startswith("OK"):
-                    continue
-
-                # 尝试解析 JSON
-                try:
-                    resp = await asyncio.to_thread(json.loads, line)
-                    
-                    # 检测正文开始时间（首个非空 content，不含 reasoning_content）
-                    # 注意：如果是在方言转换后，choices 结构可能已变，这里优先支持 OpenAI 风格探测
-                    if not content_start_recorded:
-                        choices = resp.get("choices")
-                        if choices and isinstance(choices, list) and len(choices) > 0:
-                            content = safe_get(choices[0], "delta", "content", default=None)
-                            if content and content.strip():
-                                self.current_info["content_start_time"] = time() - self.current_info.get("start_time", time())
-                                content_start_recorded = True
-                    
-                    # 使用方言注册的 usage 解析方法
-                    from core.dialects.registry import get_dialect
-                    
-                    # 优先使用显式指定的方言，否则从 current_info 获取，默认 openai
-                    d_id = self.dialect_id or self.current_info.get("dialect_id") or "openai"
-                    dialect = get_dialect(d_id)
-                    
-                    usage_info = None
-                    if dialect and dialect.parse_usage:
-                        usage_info = dialect.parse_usage(resp)
-                    
-                    # 如果当前方言未解析出 usage 且不是 openai，尝试用 openai 格式保底（处理 Canonical 转换后的情况）
-                    if not usage_info and d_id != "openai":
-                        o_dialect = get_dialect("openai")
-                        if o_dialect and o_dialect.parse_usage:
-                            usage_info = o_dialect.parse_usage(resp)
-
-                    if usage_info:
-                        self.current_info["prompt_tokens"] = usage_info.get("prompt_tokens", 0)
-                        self.current_info["completion_tokens"] = usage_info.get("completion_tokens", 0)
-                        self.current_info["total_tokens"] = usage_info.get("total_tokens", 0)
-                except Exception as e:
-                    # 仅在调试模式下记录解析错误，避免正常运行时的噪音
-                    if self.debug:
-                        logger.error(f"Error parsing streaming response: {str(e)}, line: {repr(line)}")
-                    # 出错时继续处理下一行
+                content_start_recorded = await self._process_stream_line(line, content_start_recorded)
             
             # 透传原始 chunk
             yield chunk
+
+        if line_buffer:
+            content_start_recorded = await self._process_stream_line(line_buffer, content_start_recorded)
         
         # 保存返回给用户的响应体（使用深度截断，保留结构同时限制大小）
         # 使用 asyncio.to_thread 避免大响应体阻塞事件循环
