@@ -308,9 +308,9 @@ class StatsMiddleware:
                 except json.JSONDecodeError:
                     parsed_body = None
 
-        # 获取原始数据保留时间配置（小时），默认为0表示不保存
+        # 获取原始数据保留时间配置（小时），默认为1；设为0表示不保存
         raw_data_retention_hours = safe_get(
-            config, "preferences", "log_raw_data_retention_hours", default=0
+            config, "preferences", "log_raw_data_retention_hours", default=1
         )
         
         # 如果配置了保留时间，保存请求头和请求体

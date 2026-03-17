@@ -39,7 +39,7 @@ from core.stats import (
 )
 from core.plugins import get_plugin_manager
 
-DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 600))
+DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 240))
 # DEBUG 环境变量支持 true/false/1/0/yes/no
 is_debug = env_bool("DEBUG", False)
 logger.info("DISABLE_DATABASE: %s", DISABLE_DATABASE)
