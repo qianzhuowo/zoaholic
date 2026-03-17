@@ -1,4 +1,5 @@
 import os
+import errno
 import json
 import httpx
 import asyncio
@@ -58,6 +59,89 @@ yaml.indent(mapping=2, sequence=4, offset=2)
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 API_YAML_PATH = os.path.abspath(os.getenv("API_YAML_PATH") or os.path.join(_BASE_DIR, "api.yaml"))
 yaml_error_message = None
+
+_API_YAML_FILE_CANDIDATES = {"api.yaml", "api.yml"}
+
+
+def _looks_like_docker_miscreated_api_yaml_dir(path: str) -> bool:
+    """判断目标路径是否像 Docker 单文件挂载误创建出来的 api.yaml 目录。"""
+
+    if not os.path.isdir(path):
+        return False
+    return os.path.basename(path).lower() in _API_YAML_FILE_CANDIDATES
+
+
+def _cleanup_miscreated_api_yaml_dir(path: str) -> bool:
+    """尽量安全地清理 Docker 误创建的空目录。
+
+    仅当满足以下条件时才自动移除：
+    - 目标路径当前是目录
+    - 目录名是 api.yaml / api.yml
+    - 目录为空
+    """
+
+    if not _looks_like_docker_miscreated_api_yaml_dir(path):
+        return False
+
+    try:
+        with os.scandir(path) as entries:
+            if any(entries):
+                return False
+    except OSError:
+        return False
+
+    os.rmdir(path)
+    logger.warning(
+        "Detected empty directory at API_YAML_PATH and removed it automatically. "
+        "This is usually caused by Docker single-file bind mount when the host file is missing. path=%s",
+        path,
+    )
+    return True
+
+
+def _ensure_api_yaml_path_ready(*, for_write: bool) -> str:
+    """校验 api.yaml 路径；在安全条件下清理 Docker 误创建的空目录。"""
+
+    target_path = os.path.abspath(API_YAML_PATH)
+    target_dir = os.path.dirname(target_path) or "."
+
+    if for_write:
+        os.makedirs(target_dir, exist_ok=True)
+
+    if os.path.isdir(target_path):
+        cleaned = False
+        try:
+            cleaned = _cleanup_miscreated_api_yaml_dir(target_path)
+        except OSError as e:
+            raise RuntimeError(
+                f"API_YAML_PATH '{target_path}' is a directory and could not be cleaned automatically: {e}"
+            ) from e
+
+        if not cleaned:
+            raise IsADirectoryError(
+                f"API_YAML_PATH '{target_path}' is a directory, not a file. "
+                "This is commonly caused by Docker single-file bind mount when the host-side file is missing. "
+                "Please replace it with a real file, switch to CONFIG_STORAGE=db, or seed config via CONFIG_YAML/CONFIG_URL."
+            )
+
+    return target_path
+
+
+def _should_fallback_to_direct_api_yaml_write(exc: OSError) -> bool:
+    """判断原子替换失败后是否适合回退为直接覆盖写入。"""
+
+    err_no = getattr(exc, "errno", None)
+    err_msg = str(exc).lower()
+    return err_no in {errno.EBUSY, errno.EPERM, errno.EACCES} or "device or resource busy" in err_msg
+
+
+def _write_yaml_text_to_path(path: str, processed_data: dict) -> None:
+    """直接覆盖写入 YAML 文件，并尽量确保落盘。"""
+
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(processed_data, f)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _sanitize_config_for_persistence(config_data: dict) -> dict:
@@ -255,11 +339,10 @@ def _quote_colon_strings(obj):
         return obj
 
 def save_api_yaml(config_data):
-    """将配置持久化到 api.yaml（原子写入）。
+    """将配置持久化到 api.yaml。
 
-    - 先写入同目录临时文件，再使用 os.replace 原子替换，避免部分写入
-    - 显式 flush + fsync，尽量降低“写入成功但未落盘”的风险
-    - 任何异常都会抛出，调用方应据此返回非 200
+    优先使用“临时文件 + os.replace”原子写入；若 Docker 单文件挂载导致 replace 失败，
+    自动回退为直接覆盖写入，避免常见的 "Device or resource busy" 报错。
     """
 
     import copy
@@ -280,9 +363,8 @@ def save_api_yaml(config_data):
 
     processed_data = _quote_colon_strings(processed_data)
 
-    target_path = os.path.abspath(API_YAML_PATH)
+    target_path = _ensure_api_yaml_path_ready(for_write=True)
     target_dir = os.path.dirname(target_path) or "."
-    os.makedirs(target_dir, exist_ok=True)
 
     temp_path = None
     try:
@@ -292,7 +374,18 @@ def save_api_yaml(config_data):
             f.flush()
             os.fsync(f.fileno())
 
-        os.replace(temp_path, target_path)
+        try:
+            os.replace(temp_path, target_path)
+        except OSError as e:
+            if not _should_fallback_to_direct_api_yaml_write(e):
+                raise
+
+            logger.warning(
+                "Atomic replace for api.yaml failed, falling back to direct write. path=%s error=%s",
+                target_path,
+                e,
+            )
+            _write_yaml_text_to_path(target_path, processed_data)
     except Exception as e:
         if temp_path and os.path.exists(temp_path):
             try:
@@ -511,12 +604,16 @@ async def load_config(app=None):
 
     # 2) 尝试本地文件 api.yaml（旧方式）
     if conf_seed is None and config_storage in ("auto", "db", "file"):
+        target_path = API_YAML_PATH
         try:
-            with open(API_YAML_PATH, 'r', encoding='utf-8') as file:
+            target_path = _ensure_api_yaml_path_ready(for_write=False)
+            with open(target_path, 'r', encoding='utf-8') as file:
                 conf_seed = yaml.load(file)
             if not conf_seed:
                 logger.error("配置文件 'api.yaml' 为空。请检查文件内容。")
                 conf_seed = None
+        except IsADirectoryError as e:
+            logger.error("Invalid api.yaml path: %s", e)
         except FileNotFoundError:
             if config_storage == "file":
                 logger.error("'api.yaml' not found. Please check the file path.")
@@ -526,7 +623,7 @@ async def load_config(app=None):
             yaml_error_message = "配置文件 'api.yaml' 格式不正确。请检查 YAML 格式。"
             conf_seed = None
         except OSError as e:
-            logger.error(f"open 'api.yaml' failed: {e}")
+            logger.error("open '%s' failed: %s", target_path, e)
             conf_seed = None
 
     # 3) 尝试 CONFIG_URL

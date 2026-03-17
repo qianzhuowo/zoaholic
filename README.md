@@ -112,7 +112,7 @@ docker run --rm -p 8000:8000 \
 
 | 变量 | 默认 | 说明 |
 |---|---:|---|
-| `CONFIG_STORAGE` | `file` | 配置来源策略：`auto\|db\|file\|url`。默认 `file`（`api.yaml` 为权威配置源）；云平台可用 `auto`（文件权威并同步写入 DB）或 `db`（DB 权威）。 |
+| `CONFIG_STORAGE` | `file` | 配置来源策略：`auto\|db\|file\|url`。默认 `file`（`api.yaml` 为权威配置源）；Docker / 云平台建议显式设为 `db`，避免单文件挂载问题。 |
 | `SYNC_CONFIG_TO_FILE` | `false` | 是否把配置同步写回 `api.yaml`。线上通常文件系统只读/临时，建议保持 `false`。 |
 | `JWT_SECRET` | （可选） | 管理控制台 JWT 签名密钥。**不设置也能用**：首次 `/setup` 会自动生成并持久化到 DB（`admin_user.jwt_secret`），后续重启复用。出于安全考虑仍建议在部署阶段直接设置环境变量。 |
 | `DISABLE_DATABASE` | `false` | 是否关闭数据库。线上一般不要关（否则无法配置入库/无法统计）。 |
@@ -155,6 +155,12 @@ Zoaholic 支持把配置（原 `api.yaml`）持久化到数据库：
 - 可选 `CONFIG_STORAGE=db`（云平台/多实例场景，以 DB 为权威）
   - DB 有配置：启动优先从 DB 读取
   - DB 无配置：会从 `CONFIG_YAML(_BASE64)` / `CONFIG_URL` / `api.yaml` 读取一次作为“种子”，并写入 DB
+
+- Docker / Compose 推荐：
+  - 默认使用 `CONFIG_STORAGE=db`
+  - 仅挂载 `./data:/home/data` 持久化 SQLite / 数据库文件
+  - 不再推荐默认单文件挂载 `./api.yaml:/home/api.yaml`
+  - 若必须使用 file 模式，请先在宿主机手动创建 `./api.yaml` 文件；否则 Docker 可能创建同名目录，导致配置读写失败
 
 配置入库后：
 

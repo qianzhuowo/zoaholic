@@ -6,11 +6,18 @@ services:
     ports:
       - 8001:8000
     volumes:
-      - ./api.yaml:/home/api.yaml
       - ./data:/home/data
+      # Optional file mode (not recommended for Docker):
+      # create ./api.yaml on the host first, then uncomment the next line
+      # - ./api.yaml:/home/api.yaml
     environment:
       - TZ=Asia/Shanghai
       - DB_TYPE=sqlite
       - DB_PATH=/home/data/stats.db
+      - CONFIG_STORAGE=db
       # - DATABASE_URL=postgresql://user:pass@host:5432/dbname
-      # - CONFIG_URL=http://file_url/api.yaml  # 可选：远程配置
+      # 可选：首次启动时用环境变量/远程 URL 提供配置种子（随后写入 DB）
+      # - CONFIG_YAML_BASE64=BASE64_ENCODED_API_YAML
+      # - CONFIG_URL=http://file_url/api.yaml
+      # 如需 file 模式，请先在宿主机手动创建 ./api.yaml，避免 Docker 误创建同名目录
+      # - CONFIG_STORAGE=file

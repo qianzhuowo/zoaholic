@@ -122,7 +122,7 @@ Render usually injects `PORT` automatically; Zoaholic will read `PORT` as the li
 
 | Variable | Default | Notes |
 |---|---:|---|
-| `CONFIG_STORAGE` | `file` | Config source strategy: `auto\|db\|file\|url`. Default is `file` (`api.yaml` is the source of truth); for cloud you may use `auto` (file-first + sync to DB) or `db` (DB-first). |
+| `CONFIG_STORAGE` | `file` | Config source strategy: `auto\|db\|file\|url`. Default is `file` (`api.yaml` is the source of truth); for Docker / cloud deployments, explicitly prefer `db` to avoid single-file mount pitfalls. |
 | `SYNC_CONFIG_TO_FILE` | `false` | Whether to write config back to `api.yaml`. Cloud file systems are often ephemeral/readonly, keep `false`. |
 | `JWT_SECRET` | (optional) | JWT signing key for admin console. **You can skip it**: on first `/setup`, Zoaholic auto-generates and persists `admin_user.jwt_secret` in DB and reuses it after restarts. For better security, set it explicitly. |
 | `DISABLE_DATABASE` | `false` | Disable DB entirely. Cloud usually should NOT disable it (otherwise no config persistence / no stats). |
@@ -168,6 +168,12 @@ Optional DB-first mode (`CONFIG_STORAGE=db`):
 
 - If DB has config: load from DB
 - If DB has no config yet: load once from `CONFIG_YAML(_BASE64)` / `CONFIG_URL` / `api.yaml` as a seed, then persist into DB
+
+- Recommended for Docker / Compose:
+  - Use `CONFIG_STORAGE=db` by default
+  - Persist only `./data:/home/data` for SQLite / DB files
+  - Do not use `./api.yaml:/home/api.yaml` as the default single-file bind mount
+  - If you must use file mode, create `./api.yaml` on the host first; otherwise Docker may create a directory with that name and break config read/write
 
 Once persisted:
 
