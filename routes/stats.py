@@ -15,7 +15,7 @@ from db import RequestStat, ChannelStat, async_session_scope, DISABLE_DATABASE, 
 from core.stats import get_usage_data
 from utils import safe_get, query_channel_key_stats
 from routes.deps import rate_limit_dependency, verify_api_key, verify_admin_api_key, get_app
-from core.d1_client import parse_d1_datetime
+from core.d1_client import format_d1_datetime, parse_d1_datetime
 
 router = APIRouter()
 
@@ -50,6 +50,7 @@ class QueryDetails(BaseModel):
 
     start_datetime: Optional[str] = None
     end_datetime: Optional[str] = None
+    provider_filter: Optional[str] = None
     api_key_filter: Optional[str] = None
     model_filter: Optional[str] = None
     credits: Optional[str] = None
@@ -59,6 +60,30 @@ class QueryDetails(BaseModel):
 
 class TokenUsageResponse(BaseModel):
     usage: List[TokenUsageEntry]
+    query_details: QueryDetails
+
+
+class UsageAnalysisEntry(BaseModel):
+    provider: str
+    model: str
+    request_count: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+
+
+class UsageAnalysisSummary(BaseModel):
+    provider_count: int
+    model_count: int
+    request_count: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+
+
+class UsageAnalysisResponse(BaseModel):
+    usage: List[UsageAnalysisEntry]
+    summary: UsageAnalysisSummary
     query_details: QueryDetails
 
 
@@ -521,6 +546,152 @@ async def get_stats(
     }
 
     return JSONResponse(content=stats)
+
+
+@router.get(
+    "/v1/stats/usage_analysis",
+    response_model=UsageAnalysisResponse,
+    dependencies=[Depends(rate_limit_dependency)],
+)
+async def get_usage_analysis(
+    request: Request,
+    token: str = Depends(verify_admin_api_key),
+    provider: Optional[str] = Query(default=None, description="Filter by provider name"),
+    model: Optional[str] = Query(default=None, description="Filter by model name"),
+    start_datetime: Optional[str] = Query(default=None, description="ISO start datetime"),
+    end_datetime: Optional[str] = Query(default=None, description="ISO end datetime"),
+    hours: int = Query(default=24, ge=1, le=720, description="Number of hours to look back when no explicit datetime range is provided"),
+):
+    """基础版用量分析：按 provider + model 聚合，并支持时间范围过滤。"""
+    if DISABLE_DATABASE:
+        raise HTTPException(status_code=503, detail="Database is disabled.")
+
+    now = datetime.now(timezone.utc)
+    start_dt_obj = None
+    end_dt_obj = None
+
+    try:
+        if start_datetime:
+            start_dt_obj = parse_datetime_input(start_datetime)
+        if end_datetime:
+            end_dt_obj = parse_datetime_input(end_datetime)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if start_dt_obj is None and end_dt_obj is None:
+        end_dt_obj = now
+        start_dt_obj = now - timedelta(hours=hours)
+    elif start_dt_obj is None and end_dt_obj is not None:
+        start_dt_obj = end_dt_obj - timedelta(hours=hours)
+    elif start_dt_obj is not None and end_dt_obj is None:
+        end_dt_obj = now
+
+    if start_dt_obj and end_dt_obj and end_dt_obj < start_dt_obj:
+        raise HTTPException(status_code=400, detail="end_datetime cannot be before start_datetime.")
+
+    usage_rows: List[Dict[str, Any]] = []
+
+    if (DB_TYPE or "sqlite").lower() == "d1":
+        from db import d1_client
+
+        if d1_client is None:
+            raise HTTPException(status_code=503, detail="D1 client is not available.")
+
+        sql = (
+            "SELECT provider, model, COUNT(id) AS request_count, "
+            "COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens, "
+            "COALESCE(SUM(completion_tokens), 0) AS total_completion_tokens, "
+            "COALESCE(SUM(total_tokens), 0) AS total_tokens "
+            "FROM request_stats WHERE provider IS NOT NULL AND provider != '' "
+            "AND model IS NOT NULL AND model != ''"
+        )
+        params: List[Any] = []
+        if provider:
+            sql += " AND provider = ?"
+            params.append(provider)
+        if model:
+            sql += " AND model = ?"
+            params.append(model)
+        if start_dt_obj:
+            sql += " AND timestamp >= ?"
+            params.append(format_d1_datetime(start_dt_obj))
+        if end_dt_obj:
+            sql += " AND timestamp < ?"
+            params.append(format_d1_datetime(end_dt_obj))
+
+        sql += " GROUP BY provider, model ORDER BY total_tokens DESC, request_count DESC"
+
+        rows = await d1_client.query_all(sql, params)
+        usage_rows = [
+            {
+                "provider": row.get("provider") or "",
+                "model": row.get("model") or "",
+                "request_count": int(row.get("request_count") or 0),
+                "total_prompt_tokens": int(row.get("total_prompt_tokens") or 0),
+                "total_completion_tokens": int(row.get("total_completion_tokens") or 0),
+                "total_tokens": int(row.get("total_tokens") or 0),
+            }
+            for row in rows
+        ]
+    else:
+        async with async_session_scope() as session:
+            query = (
+                select(
+                    RequestStat.provider,
+                    RequestStat.model,
+                    func.count(RequestStat.id).label("request_count"),
+                    func.coalesce(func.sum(RequestStat.prompt_tokens), 0).label("total_prompt_tokens"),
+                    func.coalesce(func.sum(RequestStat.completion_tokens), 0).label("total_completion_tokens"),
+                    func.coalesce(func.sum(RequestStat.total_tokens), 0).label("total_tokens"),
+                )
+                .where(RequestStat.provider.isnot(None), RequestStat.provider != "")
+                .where(RequestStat.model.isnot(None), RequestStat.model != "")
+            )
+
+            if provider:
+                query = query.where(RequestStat.provider == provider)
+            if model:
+                query = query.where(RequestStat.model == model)
+            if start_dt_obj:
+                query = query.where(RequestStat.timestamp >= start_dt_obj)
+            if end_dt_obj:
+                query = query.where(RequestStat.timestamp < end_dt_obj)
+
+            query = query.group_by(RequestStat.provider, RequestStat.model).order_by(desc("total_tokens"), desc("request_count"))
+            result = await session.execute(query)
+            usage_rows = [
+                {
+                    "provider": row.provider or "",
+                    "model": row.model or "",
+                    "request_count": int(row.request_count or 0),
+                    "total_prompt_tokens": int(row.total_prompt_tokens or 0),
+                    "total_completion_tokens": int(row.total_completion_tokens or 0),
+                    "total_tokens": int(row.total_tokens or 0),
+                }
+                for row in result.fetchall()
+            ]
+
+    summary = UsageAnalysisSummary(
+        provider_count=len({row["provider"] for row in usage_rows if row.get("provider")} ),
+        model_count=len({row["model"] for row in usage_rows if row.get("model")} ),
+        request_count=sum(row.get("request_count", 0) for row in usage_rows),
+        total_prompt_tokens=sum(row.get("total_prompt_tokens", 0) for row in usage_rows),
+        total_completion_tokens=sum(row.get("total_completion_tokens", 0) for row in usage_rows),
+        total_tokens=sum(row.get("total_tokens", 0) for row in usage_rows),
+    )
+
+    query_details = QueryDetails(
+        start_datetime=start_dt_obj.isoformat(timespec="seconds") if start_dt_obj else None,
+        end_datetime=end_dt_obj.isoformat(timespec="seconds") if end_dt_obj else None,
+        provider_filter=provider or "all",
+        model_filter=model or "all",
+    )
+
+    return UsageAnalysisResponse(
+        usage=[UsageAnalysisEntry(**row) for row in usage_rows],
+        summary=summary,
+        query_details=query_details,
+    )
 
 
 @router.get("/v1/token_usage", response_model=TokenUsageResponse, dependencies=[Depends(rate_limit_dependency)])

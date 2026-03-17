@@ -16,6 +16,33 @@ interface StatData {
   endpoint_request_counts: { endpoint: string; count: number }[];
 }
 
+interface UsageAnalysisEntry {
+  provider: string;
+  model: string;
+  request_count: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+}
+
+interface UsageAnalysisResponse {
+  usage: UsageAnalysisEntry[];
+  summary: {
+    provider_count: number;
+    model_count: number;
+    request_count: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_tokens: number;
+  };
+  query_details: {
+    start_datetime?: string | null;
+    end_datetime?: string | null;
+    provider_filter?: string | null;
+    model_filter?: string | null;
+  };
+}
+
 const TIME_RANGES = [
   { label: '1 小时', value: 1 },
   { label: '6 小时', value: 6 },
@@ -40,10 +67,14 @@ const ERROR_COLOR = 'hsl(var(--destructive))';
 
 export default function Dashboard() {
   const [stats, setStats] = useState<StatData | null>(null);
+  const [usageAnalysis, setUsageAnalysis] = useState<UsageAnalysisResponse | null>(null);
   const [totalTokens, setTotalTokens] = useState(0);
   const [loading, setLoading] = useState(true);
   const [timeRange, setTimeRange] = useState(24);
+  const [usageProviderFilter, setUsageProviderFilter] = useState('all');
+  const [usageModelFilter, setUsageModelFilter] = useState('all');
   const { token } = useAuthStore();
+
   const tooltipStyle = {
     backgroundColor: 'hsl(var(--popover))',
     borderColor: 'hsl(var(--border))',
@@ -51,31 +82,35 @@ export default function Dashboard() {
     borderRadius: '8px'
   };
 
+  const formatNumber = (value: number) => (value || 0).toLocaleString();
+
   const fetchData = async () => {
     if (!token) return;
     setLoading(true);
     try {
       const headers = { Authorization: `Bearer ${token}` };
+      const [statsRes, usageRes] = await Promise.all([
+        fetch(`/v1/stats?hours=${timeRange}`, { headers }),
+        fetch(`/v1/stats/usage_analysis?hours=${timeRange}`, { headers })
+      ]);
 
-      const statsRes = await fetch(`/v1/stats?hours=${timeRange}`, { headers });
       if (statsRes.ok) {
         const data = await statsRes.json();
         setStats(data.stats || data);
       }
 
-      // Token 使用量：跟随当前 timeRange（单位小时），而不是固定 30 天
-      const end = new Date();
-      const start = new Date(end.getTime() - timeRange * 60 * 60 * 1000);
-      const tokenUrl = `/v1/token_usage?start_datetime=${encodeURIComponent(start.toISOString())}&end_datetime=${encodeURIComponent(end.toISOString())}`;
-
-      const tokenRes = await fetch(tokenUrl, { headers });
-      if (tokenRes.ok) {
-        const data = await tokenRes.json();
-        const total = data.usage?.reduce((sum: number, item: any) => sum + (item.total_tokens || 0), 0) || 0;
-        setTotalTokens(total);
+      if (usageRes.ok) {
+        const data: UsageAnalysisResponse = await usageRes.json();
+        setUsageAnalysis(data);
+        setTotalTokens(data.summary?.total_tokens || 0);
+      } else {
+        setUsageAnalysis(null);
+        setTotalTokens(0);
       }
     } catch (err) {
       console.error('Failed to fetch stats:', err);
+      setUsageAnalysis(null);
+      setTotalTokens(0);
     } finally {
       setLoading(false);
     }
@@ -88,6 +123,48 @@ export default function Dashboard() {
   const channelStats = stats?.channel_success_rates || [];
   const modelStats = stats?.model_request_counts || [];
   const endpointStats = stats?.endpoint_request_counts || [];
+  const usageRows = usageAnalysis?.usage || [];
+
+  const providerOptions = Array.from(new Set(usageRows.map(item => item.provider).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const modelOptions = Array.from(new Set(
+    usageRows
+      .filter(item => usageProviderFilter === 'all' || item.provider === usageProviderFilter)
+      .map(item => item.model)
+      .filter(Boolean)
+  )).sort((a, b) => a.localeCompare(b));
+
+  useEffect(() => {
+    if (usageProviderFilter !== 'all' && !providerOptions.includes(usageProviderFilter)) {
+      setUsageProviderFilter('all');
+    }
+  }, [usageProviderFilter, usageAnalysis]);
+
+  useEffect(() => {
+    if (usageModelFilter !== 'all' && !modelOptions.includes(usageModelFilter)) {
+      setUsageModelFilter('all');
+    }
+  }, [usageModelFilter, usageProviderFilter, usageAnalysis]);
+
+  const filteredUsageRows = usageRows.filter(item => {
+    const providerMatched = usageProviderFilter === 'all' || item.provider === usageProviderFilter;
+    const modelMatched = usageModelFilter === 'all' || item.model === usageModelFilter;
+    return providerMatched && modelMatched;
+  });
+
+  const usageSummary = filteredUsageRows.reduce((acc, item) => ({
+    request_count: acc.request_count + (item.request_count || 0),
+    total_prompt_tokens: acc.total_prompt_tokens + (item.total_prompt_tokens || 0),
+    total_completion_tokens: acc.total_completion_tokens + (item.total_completion_tokens || 0),
+    total_tokens: acc.total_tokens + (item.total_tokens || 0),
+  }), {
+    request_count: 0,
+    total_prompt_tokens: 0,
+    total_completion_tokens: 0,
+    total_tokens: 0,
+  });
+
+  const filteredProviderCount = new Set(filteredUsageRows.map(item => item.provider).filter(Boolean)).size;
+  const filteredModelCount = new Set(filteredUsageRows.map(item => item.model).filter(Boolean)).size;
 
   const totalRequests = channelStats.reduce((sum, item) => sum + item.total_requests, 0) || 0;
   const avgSuccessRate = totalRequests > 0
@@ -98,8 +175,8 @@ export default function Dashboard() {
   const timeRangeLabel = TIME_RANGES.find(r => r.value === timeRange)?.label ?? `${timeRange} 小时`;
 
   const topCards = [
-    { label: '总请求量', value: totalRequests.toLocaleString(), icon: Zap, color: 'text-amber-500', bg: 'bg-amber-500/10' },
-    { label: `Token 消耗 (${timeRangeLabel})`, value: totalTokens.toLocaleString(), icon: BarChart3, color: 'text-blue-500', bg: 'bg-blue-500/10' },
+    { label: '总请求量', value: formatNumber(totalRequests), icon: Zap, color: 'text-amber-500', bg: 'bg-amber-500/10' },
+    { label: `Token 消耗 (${timeRangeLabel})`, value: formatNumber(totalTokens), icon: BarChart3, color: 'text-blue-500', bg: 'bg-blue-500/10' },
     { label: '平均成功率', value: `${(avgSuccessRate * 100).toFixed(1)}%`, icon: CheckCircle2, color: 'text-emerald-500', bg: 'bg-emerald-500/10' },
     { label: '活跃渠道', value: activeChannels.toString(), icon: Cpu, color: 'text-purple-500', bg: 'bg-purple-500/10' },
   ];
@@ -126,7 +203,6 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 font-sans pb-12">
-      {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">数据看板</h1>
@@ -140,8 +216,8 @@ export default function Dashboard() {
                 key={range.value}
                 onClick={() => setTimeRange(range.value)}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${timeRange === range.value
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                   }`}
               >
                 {range.label}
@@ -154,7 +230,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Top Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {topCards.map((stat, i) => (
           <div key={i} className="bg-card border border-border p-6 rounded-xl shadow-sm">
@@ -171,7 +246,99 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* Chart Section 1 */}
+      <section className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
+        <div className="p-6 border-b border-border bg-muted/30 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-blue-500" />
+              用量分析
+            </h3>
+            <p className="text-sm text-muted-foreground mt-1">按渠道与模型查看 {timeRangeLabel} 内的请求量与 Token 消耗。</p>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
+            <select
+              value={usageProviderFilter}
+              onChange={(e) => {
+                setUsageProviderFilter(e.target.value);
+                setUsageModelFilter('all');
+              }}
+              className="w-full sm:w-52 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+            >
+              <option value="all">全部渠道</option>
+              {providerOptions.map(provider => (
+                <option key={provider} value={provider}>{provider}</option>
+              ))}
+            </select>
+            <select
+              value={usageModelFilter}
+              onChange={(e) => setUsageModelFilter(e.target.value)}
+              className="w-full sm:w-64 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+            >
+              <option value="all">全部模型</option>
+              {modelOptions.map(model => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+            {[
+              { label: '渠道数', value: formatNumber(filteredProviderCount) },
+              { label: '模型数', value: formatNumber(filteredModelCount) },
+              { label: '请求数', value: formatNumber(usageSummary.request_count) },
+              { label: '输入 Token', value: formatNumber(usageSummary.total_prompt_tokens) },
+              { label: '输出 Token', value: formatNumber(usageSummary.total_completion_tokens) },
+            ].map((item) => (
+              <div key={item.label} className="bg-background border border-border rounded-lg p-4">
+                <p className="text-sm text-muted-foreground">{item.label}</p>
+                <p className="text-2xl font-semibold text-foreground mt-2">{item.value}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-background border border-border rounded-lg p-4">
+            <p className="text-sm text-muted-foreground">总 Token</p>
+            <p className="text-3xl font-bold text-foreground mt-2">{formatNumber(usageSummary.total_tokens)}</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-muted text-muted-foreground font-medium">
+                <tr>
+                  <th className="px-4 py-3">渠道</th>
+                  <th className="px-4 py-3">模型</th>
+                  <th className="px-4 py-3 text-right">请求数</th>
+                  <th className="px-4 py-3 text-right">输入 Token</th>
+                  <th className="px-4 py-3 text-right">输出 Token</th>
+                  <th className="px-4 py-3 text-right">总 Token</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {filteredUsageRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">当前筛选条件下暂无用量数据</td>
+                  </tr>
+                ) : (
+                  filteredUsageRows.map((item) => (
+                    <tr key={`${item.provider}-${item.model}`} className="hover:bg-muted/50 transition-colors">
+                      <td className="px-4 py-3 font-medium text-foreground">{item.provider}</td>
+                      <td className="px-4 py-3 text-foreground max-w-[320px] truncate" title={item.model}>{item.model}</td>
+                      <td className="px-4 py-3 text-right font-mono text-muted-foreground">{formatNumber(item.request_count)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-muted-foreground">{formatNumber(item.total_prompt_tokens)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-muted-foreground">{formatNumber(item.total_completion_tokens)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-semibold text-foreground">{formatNumber(item.total_tokens)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-card border border-border rounded-xl p-6 shadow-sm">
           <h3 className="text-base font-semibold text-foreground mb-6 flex items-center gap-2">
@@ -233,7 +400,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Chart Section 2 & Table */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-card border border-border rounded-xl p-6 shadow-sm flex flex-col">
           <h3 className="text-base font-semibold text-foreground mb-6 flex items-center gap-2">

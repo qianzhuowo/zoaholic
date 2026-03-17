@@ -30,7 +30,16 @@ from core.models import (
     ModerationRequest,
     EmbeddingRequest,
 )
-from core.utils import get_engine, provider_api_circular_list, truncate_for_logging
+from core.request_helpers import (
+    build_attempt_provider_list,
+    merge_headers_case_insensitive,
+    set_header_default_case_insensitive,
+)
+from core.utils import (
+    get_engine,
+    provider_api_circular_list,
+    truncate_for_logging,
+)
 from core.routing import get_right_order_providers
 from core.error_response import openai_error_response
 from utils import safe_get, error_handling_wrapper
@@ -191,7 +200,7 @@ async def process_request(
     last_message_role = safe_get(request, "messages", -1, "role", default=None)
     
     url, headers, payload = await get_payload(request, engine, provider, api_key)
-    headers.update(safe_get(provider, "preferences", "headers", default={}))  # add custom headers
+    headers = merge_headers_case_insensitive(headers, safe_get(provider, "preferences", "headers", default={}))
     
 
     current_info = request_info_getter()
@@ -540,10 +549,10 @@ async def process_request_passthrough(
 
     url, adapter_headers, _ = await adapter(request, engine, provider, api_key)
 
-    headers: Dict[str, Any] = dict(adapter_headers or {})
-    headers.update(_filter_passthrough_headers(passthrough_ctx.original_headers))
-    headers.update(safe_get(provider, "preferences", "headers", default={}))
-    headers.setdefault("Content-Type", "application/json")
+    headers: Dict[str, Any] = merge_headers_case_insensitive(adapter_headers or {})
+    headers = merge_headers_case_insensitive(headers, _filter_passthrough_headers(passthrough_ctx.original_headers))
+    headers = merge_headers_case_insensitive(headers, safe_get(provider, "preferences", "headers", default={}))
+    set_header_default_case_insensitive(headers, "Content-Type", "application/json")
 
     payload = apply_passthrough_modifications(
         passthrough_ctx.original_payload,
@@ -709,6 +718,38 @@ class ModelRequestHandler:
         self.last_provider_indices = defaultdict(lambda: -1)
         self.locks = defaultdict(asyncio.Lock)
 
+    async def _build_attempt_providers(
+        self,
+        providers: List[Dict[str, Any]],
+        request_model_name: str,
+        scheduling_algorithm: str,
+        advance_cursor: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """构建单次请求的尝试列表。
+
+        目标：
+        - 保留加权轮询展开后的“槽位分布”，以便跨请求维持首选渠道占比
+        - 在单次请求内对 provider 去重，避免同一渠道被重复尝试
+        """
+        if not providers:
+            return []
+
+        provider_names = [str(provider.get("provider", "")) for provider in providers]
+        has_duplicate_slots = len(set(provider_names)) < len(provider_names)
+        should_rotate = scheduling_algorithm != "fixed_priority" or has_duplicate_slots
+
+        start_index = 0
+        if should_rotate and advance_cursor:
+            async with self.locks[request_model_name]:
+                self.last_provider_indices[request_model_name] = (
+                    self.last_provider_indices[request_model_name] + 1
+                ) % len(providers)
+                start_index = self.last_provider_indices[request_model_name]
+
+        attempt_providers = build_attempt_provider_list(providers, start_index=start_index)
+
+        return attempt_providers
+
     async def request_model(
         self,
         request_data: Union[RequestModel, ImageGenerationRequest, AudioTranscriptionRequest, ModerationRequest, EmbeddingRequest],
@@ -758,18 +799,16 @@ class ModelRequestHandler:
             request_model_name, config, api_index, scheduling_algorithm, 
             self.app, request_total_tokens=request_total_tokens
         )
+        matching_providers = await self._build_attempt_providers(
+            matching_providers,
+            request_model_name=request_model_name,
+            scheduling_algorithm=scheduling_algorithm,
+            advance_cursor=True,
+        )
         num_matching_providers = len(matching_providers)
 
         status_code = 500
         error_message = None
-
-        start_index = 0
-        if scheduling_algorithm != "fixed_priority":
-            async with self.locks[request_model_name]:
-                self.last_provider_indices[request_model_name] = (
-                    self.last_provider_indices[request_model_name] + 1
-                ) % num_matching_providers
-                start_index = self.last_provider_indices[request_model_name]
 
         auto_retry = safe_get(config, 'api_keys', api_index, "preferences", "AUTO_RETRY", default=True)
         role = safe_get(
@@ -876,7 +915,7 @@ class ModelRequestHandler:
         while True:
             if index >= max_attempts:
                 break
-            current_index = (start_index + index) % num_matching_providers
+            current_index = index % num_matching_providers
             index += 1
             provider = matching_providers[current_index]
 

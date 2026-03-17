@@ -16,6 +16,17 @@ from httpx_socks import AsyncProxyTransport
 from urllib.parse import urlparse, urlunparse
 
 from .log_config import logger
+from .request_helpers import merge_headers_case_insensitive, set_header_default_case_insensitive
+
+
+def get_header_case_insensitive(headers: dict[str, str], key: str, default=None):
+    """大小写无关地读取请求头。"""
+    normalized_key = str(key or "").strip().lower()
+    for existing_key, value in (headers or {}).items():
+        if str(existing_key).strip().lower() == normalized_key:
+            return value
+    return default
+
 
 def get_model_dict(provider):
     """
