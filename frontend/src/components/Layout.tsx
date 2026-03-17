@@ -16,6 +16,7 @@ export default function Layout() {
     { id: '/playground', label: '测试工坊', icon: <Terminal className="w-5 h-5" /> },
     { id: '/plugins', label: '插件管理', icon: <Puzzle className="w-5 h-5" /> },
     { id: '/logs', label: '系统日志', icon: <FileText className="w-5 h-5" /> },
+    { id: '/backend-logs', label: '后台日志', icon: <Terminal className="w-5 h-5" /> },
     { id: '/admin', label: '密钥管理', icon: <Key className="w-5 h-5" /> },
     { id: '/settings', label: '系统设置', icon: <SettingsIcon className="w-5 h-5" /> },
   ];
@@ -33,8 +34,8 @@ export default function Layout() {
             to={item.id}
             onClick={handleNavClick}
             className={`flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-              location.pathname === item.id 
-                ? 'bg-primary text-primary-foreground shadow-md' 
+              location.pathname === item.id
+                ? 'bg-primary text-primary-foreground shadow-md'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
           >
@@ -58,7 +59,7 @@ export default function Layout() {
           </button>
         </div>
 
-        <button 
+        <button
           onClick={logout}
           className="flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-red-600 dark:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 w-full transition-colors"
         >
@@ -84,7 +85,7 @@ export default function Layout() {
 
       {/* Mobile Menu Overlay */}
       {mobileMenuOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 z-40 md:hidden"
           onClick={() => setMobileMenuOpen(false)}
         />
@@ -119,7 +120,7 @@ export default function Layout() {
           >
             <Menu className="w-5 h-5" />
           </button>
-          
+
           <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
             {navItems.find(item => item.id === location.pathname)?.label || 'Zoaholic'}
           </h2>

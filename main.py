@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import FastAPI, HTTPException, Request
 
-from core.log_config import logger
+from core.log_config import logger, apply_backend_log_preferences
 from routes import api_router
 from core.env import env_bool
 from core.utils import parse_rate_limit, ThreadSafeCircularList, ApiKeyRateLimitRegistry
@@ -406,6 +406,8 @@ async def lifespan(app: FastAPI):
                     "round_robin"
                 )
         app.state.global_rate_limit = parse_rate_limit(safe_get(app.state.config, "preferences", "rate_limit", default="999999/min"))
+
+        apply_backend_log_preferences(safe_get(app.state.config, "preferences", default={}) or {})
 
         # 如果没有任何 API key，则标记需要初始化并允许服务启动（用于 /setup 初始化向导）
         if not app.state.api_keys_db or not app.state.api_list:

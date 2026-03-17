@@ -5,6 +5,7 @@ import Playground from './pages/Playground';
 import Admin from './pages/Admin';
 import Settings from './pages/Settings';
 import Logs from './pages/Logs';
+import BackendLogs from './pages/BackendLogs';
 import Plugins from './pages/Plugins';
 import Layout from './components/Layout';
 import Login from './pages/Login';
@@ -31,6 +32,7 @@ function App() {
           <Route path="admin" element={<Admin />} />
           <Route path="settings" element={<Settings />} />
           <Route path="logs" element={<Logs />} />
+          <Route path="backend-logs" element={<BackendLogs />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Route>
       </Routes>

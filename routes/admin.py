@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
 from core.env import env_bool
+from core.log_config import apply_backend_log_preferences
 from core.utils import parse_rate_limit, ThreadSafeCircularList, ApiKeyRateLimitRegistry, safe_get
 from utils import update_config, API_YAML_PATH, yaml, dump_config_to_json_obj
 from routes.deps import rate_limit_dependency, verify_admin_api_key, get_app
@@ -177,6 +178,7 @@ async def api_config_update(
 
     # 动态刷新限流配置，避免已存在 API key 继续使用旧限流器
     _refresh_runtime_rate_limit_state(app)
+    apply_backend_log_preferences(safe_get(app.state.config, "preferences", default={}) or {})
 
     # 进一步防止“假成功”：当本次要求写 yaml 时，回读文件校验关键段一致。
     if save_to_file:

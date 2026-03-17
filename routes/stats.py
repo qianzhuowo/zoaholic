@@ -180,6 +180,27 @@ class LogsPage(BaseModel):
     total_pages: int
 
 
+class BackendLogEntry(BaseModel):
+    id: int
+    captured_at: datetime
+    stream: Literal["stdout", "stderr"]
+    message: str
+
+    @field_serializer("captured_at")
+    def serialize_dt(self, dt: datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+
+
+class BackendLogsPage(BaseModel):
+    items: List[BackendLogEntry]
+    total: int
+    limit: int
+    max_id: int
+    buffer_size: int
+
+
 # 可手动清理的日志字段（大字段优先）
 LOG_CLEARABLE_FIELDS: Dict[str, str] = {
     "request_headers": "用户请求头(request_headers)",
@@ -1427,4 +1448,35 @@ async def get_logs(
         page=page,
         page_size=page_size,
         total_pages=total_pages,
+    )
+
+
+@router.get("/v1/backend_logs", response_model=BackendLogsPage, dependencies=[Depends(rate_limit_dependency)])
+async def get_backend_logs(
+    limit: int = Query(200, ge=1, le=2000, description="Maximum number of backend log lines to return"),
+    since_id: Optional[int] = Query(None, ge=0, description="Return log lines whose id is greater than this value"),
+    search: Optional[str] = Query(None, description="Keyword filter for backend log content"),
+    stream: Optional[str] = Query(None, description="Filter by output stream: stdout or stderr"),
+    token: str = Depends(verify_admin_api_key),
+):
+    normalized_stream = (stream or "").strip().lower() or None
+    if normalized_stream not in {None, "stdout", "stderr"}:
+        raise HTTPException(status_code=400, detail="Invalid stream. Allowed values: stdout, stderr")
+
+    from core.log_config import get_backend_log_entries
+
+    snapshot = get_backend_log_entries(
+        since_id=since_id,
+        limit=limit,
+        search=search,
+        stream=normalized_stream,
+    )
+
+    items = [BackendLogEntry(**item) for item in snapshot["items"]]
+    return BackendLogsPage(
+        items=items,
+        total=int(snapshot["total"]),
+        limit=limit,
+        max_id=int(snapshot["max_id"]),
+        buffer_size=int(snapshot["buffer_size"]),
     )
