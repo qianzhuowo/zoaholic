@@ -1,7 +1,7 @@
 # ===============
 # Stage 1: Frontend build
 # ===============
-FROM node:20-slim AS frontend_builder
+FROM node:20.19.0-bookworm-slim AS frontend_builder
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/package-lock.json ./
