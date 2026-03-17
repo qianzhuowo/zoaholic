@@ -825,6 +825,47 @@ class ModelRequestHandler:
             tmp_retry_count = total_slots * 2
             return min(tmp_retry_count, max_retry_limit)
 
+        def _is_image_generation_model(*model_names: Any) -> bool:
+            for model_name in model_names:
+                if not isinstance(model_name, str):
+                    continue
+                model_lower = model_name.lower()
+                if "-image" in model_lower or "image-generation" in model_lower:
+                    return True
+            return False
+
+        def _should_skip_retry_for_deterministic_502(
+            request_model: str,
+            upstream_model: str,
+            message: str,
+        ) -> bool:
+            error_text = (message or "").lower()
+
+            if _is_image_generation_model(request_model, upstream_model):
+                if (
+                    "no image was generated" in error_text
+                    or "image generation failed" in error_text
+                    or "returned no image" in error_text
+                    or "gemini returned empty response" in error_text
+                ):
+                    return True
+
+            deterministic_policy_markers = (
+                "content management policy",
+                "content policy",
+                "content filter",
+                "filtered due to the prompt",
+                "prompt was flagged",
+                "gemini blocked",
+                "blocked: safety",
+                "blocked by safety",
+                "safety policy",
+                "safety settings",
+                "policy violation",
+                "responsible ai policy",
+            )
+            return any(marker in error_text for marker in deterministic_policy_markers)
+
         retry_count = _calc_retry_count(matching_providers)
         max_attempts = num_matching_providers + retry_count
 
@@ -1079,15 +1120,29 @@ class ModelRequestHandler:
                 if retry_path:
                     retry_path[-1]["status_code"] = status_code
 
-                retry_enabled = (
-                    auto_retry
-                    and (
-                        status_code not in [400, 413]
-                        or urlparse(provider.get('base_url', '')).netloc == 'models.inference.ai.azure.com'
+                retryable_statuses = {429, 500, 502, 503, 504}
+                explicitly_non_retryable_statuses = {401, 403, 404, 422}
+                skip_retry_for_deterministic_502 = (
+                    status_code == 502 and _should_skip_retry_for_deterministic_502(
+                        request_model_name,
+                        original_model,
+                        error_message,
                     )
                 )
+                if skip_retry_for_deterministic_502:
+                    logger.info(
+                        f"Skip retry for deterministic 502 failure: provider={channel_id}, "
+                        f"model={request_model_name}, error={error_message}"
+                    )
 
-                # 若还有剩余尝试次数，则进行自动重试（并对 429/5xx 做简单退避，避免瞬时打爆上游/卡死进程）
+                retry_enabled = (
+                    auto_retry
+                    and status_code in retryable_statuses
+                    and status_code not in explicitly_non_retryable_statuses
+                    and not skip_retry_for_deterministic_502
+                )
+
+                # 若还有剩余尝试次数，则进行自动重试（仅保留 429/500/502/503/504；确定性 502 不重试）
                 if retry_enabled and index < max_attempts:
                     if status_code in {429, 500, 502, 503, 504}:
                         base_delay = 0.5 if status_code == 429 else 0.2

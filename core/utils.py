@@ -79,13 +79,19 @@ class BaseAPI:
                 before_v1 = before_v1 + "/"
         else:
             before_v1 = ""
+
+        def _ensure_leading_slash(path: str) -> str:
+            if not path.startswith("/"):
+                return "/" + path
+            return path
+
         self.base_url: str = urlunparse(parsed_url[:2] + ("",) + ("",) * 3)
         self.v1_url: str = urlunparse(parsed_url[:2]+ (before_v1,) + ("",) * 3)
         if "v1/messages" in parsed_url.path:
             # 注意：path 必须以 / 开头，否则 urlunparse 会生成无效 URL（缺少 /）
             self.v1_models: str = urlunparse(parsed_url[:2] + ("/v1/models",) + ("",) * 3)
         else:
-            self.v1_models: str = urlunparse(parsed_url[:2] + (before_v1 + "models",) + ("",) * 3)
+            self.v1_models: str = urlunparse(parsed_url[:2] + (_ensure_leading_slash(before_v1 + "models"),) + ("",) * 3)
 
         if "v1/responses" in parsed_url.path:
             self.chat_url: str = api_url
