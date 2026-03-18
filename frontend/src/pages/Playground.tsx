@@ -725,10 +725,10 @@ export default function Playground() {
                 {/* Message bubble */}
                 <div className={`w-fit max-w-[90%] px-3.5 py-2.5 rounded-2xl transition-colors ${
                   msg.role === 'user'
-                    ? 'bg-primary text-primary-foreground'
+                    ? 'bg-primary text-primary-foreground rounded-tr-[4px]'
                     : msg.role === 'system'
-                      ? 'bg-red-500/8 border border-red-500/15 text-foreground'
-                      : 'bg-muted/50 border border-border/60 text-foreground'
+                      ? 'bg-red-500/8 border border-red-500/15 text-foreground rounded-tl-[4px]'
+                      : 'bg-muted/50 border border-border/60 text-foreground rounded-tl-[4px] shadow-sm'
                 }`}>
 
                   {/* Reasoning / Thinking */}
@@ -772,12 +772,12 @@ export default function Playground() {
                   ) : (
                     <div className="space-y-2">
                       {msg.content ? (markdownRendering ? (
-                        <div className="text-[13.5px] leading-relaxed">
-                          <MarkdownRenderer content={msg.content} tone={msg.role === 'user' ? 'inverse' : 'default'} />
+                        <div className="text-[14.5px] leading-relaxed">
+                          <MarkdownRenderer content={msg.content} tone={msg.role === 'user' ? 'inverse' : 'default'} className={msg.role === 'user' ? 'my-0' : 'my-1'} />
                           {msg.isTyping ? <span className="inline-block w-1.5 h-3.5 bg-current opacity-60 animate-pulse align-middle ml-0.5" /> : null}
                         </div>
                       ) : (
-                        <div className="text-[13.5px] leading-relaxed whitespace-pre-wrap break-words">
+                        <div className={`text-[14.5px] leading-relaxed whitespace-pre-wrap break-words ${msg.role === 'user' ? 'my-0' : 'my-1'}`}>
                           {msg.content}
                           {msg.isTyping ? <span className="inline-block w-1.5 h-3.5 bg-current opacity-60 ml-0.5 animate-pulse align-middle" /> : null}
                         </div>

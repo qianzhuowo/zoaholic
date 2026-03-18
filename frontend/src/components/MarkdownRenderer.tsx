@@ -21,7 +21,7 @@ type MarkdownBlock =
 
 const BLOCK_START_PATTERNS = [
   /^```/,
-  /^#{1,6}\s+/,
+  /^#{1,6}(?:\s+|$)/,
   /^>\s?/,
   /^(\s*)[-+*]\s+/,
   /^\d+\.\s+/,
@@ -31,33 +31,33 @@ const BLOCK_START_PATTERNS = [
 const TONE_STYLES: Record<MarkdownTone, Record<string, string>> = {
   default: {
     root: 'text-foreground/95',
-    heading: 'text-foreground',
-    link: 'text-sky-600 dark:text-sky-400 hover:text-sky-500 dark:hover:text-sky-300',
-    inlineCode: 'border border-border/60 bg-muted/70 text-foreground/90 shadow-none',
-    codeShell: 'border border-border/60 bg-[#0d1117] text-slate-200 shadow-sm',
-    codeHeader: 'border-b border-white/[0.06] bg-[#161b22] text-slate-400',
-    codeButton: 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.06]',
-    quote: 'border-l-[3px] border-sky-500/30 bg-sky-500/[0.04] text-foreground/80',
-    hr: 'border-border/50',
-    tableWrap: 'border border-border/60 bg-background/80 shadow-sm',
-    tableHead: 'bg-muted/50 text-foreground/80',
-    tableRow: 'border-t border-border/50',
-    tableCell: 'text-foreground/85'
+    heading: 'text-foreground font-semibold tracking-tight',
+    link: 'text-primary underline decoration-primary/30 hover:decoration-primary/80 transition-colors',
+    inlineCode: 'border border-border bg-muted text-foreground/90 shadow-sm px-1.5 py-0.5 rounded-md mx-0.5 font-mono text-[0.85em]',
+    codeShell: 'border border-border bg-[#1e1e1e] text-slate-200 shadow-md my-3 rounded-xl overflow-hidden',
+    codeHeader: 'border-b border-white/10 bg-[#2d2d2d] text-slate-400 px-4 py-2 flex items-center justify-between',
+    codeButton: 'text-slate-400 hover:text-white hover:bg-white/10 p-1.5 rounded-md transition-all',
+    quote: 'border-l-4 border-primary/40 bg-primary/5 text-foreground/80 my-3 px-4 py-3 rounded-r-lg italic',
+    hr: 'border-border/60 my-5',
+    tableWrap: 'border border-border bg-card shadow-sm my-3 rounded-xl overflow-hidden',
+    tableHead: 'bg-muted text-foreground font-semibold',
+    tableRow: 'border-t border-border hover:bg-muted/30 transition-colors',
+    tableCell: 'text-foreground/90'
   },
   inverse: {
     root: 'text-primary-foreground/95',
-    heading: 'text-primary-foreground',
-    link: 'text-primary-foreground underline decoration-primary-foreground/60 hover:decoration-primary-foreground',
-    inlineCode: 'border border-white/10 bg-black/15 text-primary-foreground/90',
-    codeShell: 'border border-white/[0.08] bg-black/30 text-primary-foreground/90',
-    codeHeader: 'border-b border-white/[0.06] bg-black/20 text-primary-foreground/60',
-    codeButton: 'text-primary-foreground/60 hover:text-primary-foreground hover:bg-white/[0.08]',
-    quote: 'border-l-[3px] border-white/25 bg-white/[0.06] text-primary-foreground/80',
-    hr: 'border-white/15',
-    tableWrap: 'border border-white/[0.08] bg-black/10',
-    tableHead: 'bg-white/[0.06] text-primary-foreground/80',
-    tableRow: 'border-t border-white/[0.08]',
-    tableCell: 'text-primary-foreground/85'
+    heading: 'text-primary-foreground font-semibold tracking-tight',
+    link: 'text-primary-foreground underline decoration-primary-foreground/40 hover:decoration-primary-foreground transition-colors',
+    inlineCode: 'border border-white/20 bg-black/20 text-primary-foreground shadow-sm px-1.5 py-0.5 rounded-md mx-0.5 font-mono text-[0.85em]',
+    codeShell: 'border border-white/10 bg-black/40 text-primary-foreground/90 shadow-md my-3 rounded-xl overflow-hidden',
+    codeHeader: 'border-b border-white/10 bg-black/40 text-primary-foreground/70 px-4 py-2 flex items-center justify-between',
+    codeButton: 'text-primary-foreground/60 hover:text-primary-foreground hover:bg-white/10 p-1.5 rounded-md transition-all',
+    quote: 'border-l-4 border-white/30 bg-white/5 text-primary-foreground/90 my-3 px-4 py-3 rounded-r-lg italic',
+    hr: 'border-white/20 my-5',
+    tableWrap: 'border border-white/10 bg-black/20 shadow-sm my-3 rounded-xl overflow-hidden',
+    tableHead: 'bg-white/10 text-primary-foreground font-semibold',
+    tableRow: 'border-t border-white/10 hover:bg-white/5 transition-colors',
+    tableCell: 'text-primary-foreground/90'
   }
 };
 
@@ -85,7 +85,8 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > cursor) {
-      tokens.push(text.slice(cursor, match.index));
+      const raw = text.slice(cursor, match.index);
+      tokens.push(renderTextNode(raw, tone, `${keyPrefix}-text-${cursor}`));
     }
 
     const [matched] = match;
@@ -105,7 +106,7 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
       tokens.push(
         <code
           key={`${keyPrefix}-code-${match.index}`}
-          className={`rounded px-[5px] py-[1px] font-mono text-[0.88em] leading-none ${styles.inlineCode}`}
+          className={styles.inlineCode}
         >
           {match[3]}
         </code>
@@ -131,18 +132,29 @@ function renderInline(text: string, keyPrefix: string, tone: MarkdownTone): Reac
         </em>
       );
     } else {
-      tokens.push(matched);
+      tokens.push(renderTextNode(matched, tone, `${keyPrefix}-raw-${match.index}`));
     }
 
     cursor = match.index + matched.length;
   }
 
   if (cursor < text.length) {
-    tokens.push(text.slice(cursor));
+    const raw = text.slice(cursor);
+    tokens.push(renderTextNode(raw, tone, `${keyPrefix}-text-end`));
+  }
+
+  // Avoid double wrapping if it's already an array of elements
+  if (tokens.length === 1 && typeof tokens[0] === 'string') {
+    return [renderTextNode(tokens[0] as string, tone, `${keyPrefix}-single`)];
   }
 
   return tokens;
 }
+
+const renderTextNode = (text: string, tone: MarkdownTone, keyPrefix?: string) => {
+  return <span key={keyPrefix} className={tone === 'inverse' ? 'text-primary-foreground/95' : 'text-foreground/90'}>{text}</span>;
+}
+
 
 function parseBlocks(content: string): MarkdownBlock[] {
   const lines = normalizeMarkdown(content).split('\n');
@@ -176,9 +188,9 @@ function parseBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
-    const heading = currentLine.match(/^(#{1,6})\s+(.*)$/);
+    const heading = currentLine.match(/^(#{1,6})(?:\s+(.*))?$/);
     if (heading) {
-      blocks.push({ type: 'heading', level: heading[1].length, content: heading[2].trim() });
+      blocks.push({ type: 'heading', level: heading[1].length, content: (heading[2] || '').trim() });
       index += 1;
       continue;
     }
@@ -266,10 +278,10 @@ function parseBlocks(content: string): MarkdownBlock[] {
 }
 
 function headingClassName(level: number) {
-  if (level === 1) return 'text-lg leading-snug font-semibold tracking-tight';
-  if (level === 2) return 'text-[1.1rem] leading-snug font-semibold tracking-tight';
-  if (level === 3) return 'text-[1rem] leading-snug font-semibold';
-  return 'text-[0.9rem] leading-snug font-semibold';
+  if (level === 1) return 'text-xl leading-tight mt-6 mb-3 first:mt-0';
+  if (level === 2) return 'text-lg leading-snug mt-5 mb-2.5 border-b border-border/40 pb-1 first:mt-0';
+  if (level === 3) return 'text-base leading-snug mt-4 mb-2 first:mt-0';
+  return 'text-sm leading-snug mt-3 mb-1.5 opacity-90 first:mt-0';
 }
 
 function CodeBlock({ code, language, tone }: { code: string; language?: string; tone: MarkdownTone }) {
@@ -287,20 +299,20 @@ function CodeBlock({ code, language, tone }: { code: string; language?: string; 
   };
 
   return (
-    <div className={`overflow-hidden rounded-xl ${styles.codeShell}`}>
-      <div className={`flex items-center justify-between gap-3 px-3.5 py-1.5 text-[11px] ${styles.codeHeader}`}>
-        <span className="truncate font-mono uppercase tracking-widest opacity-70">{language || 'code'}</span>
+    <div className={styles.codeShell}>
+      <div className={styles.codeHeader}>
+        <span className="truncate font-mono text-[11px] uppercase tracking-wider opacity-80">{language || 'text'}</span>
         <button
           type="button"
           onClick={handleCopy}
-          className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors ${styles.codeButton}`}
+          className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${styles.codeButton}`}
           title="复制代码"
         >
           {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
           {copied ? '已复制' : '复制'}
         </button>
       </div>
-      <pre className="overflow-x-auto px-3.5 py-3 text-[12.5px] leading-[1.6] font-mono whitespace-pre">
+      <pre className="overflow-x-auto p-4 text-[13px] leading-relaxed font-mono whitespace-pre">
         <code>{code}</code>
       </pre>
     </div>
@@ -322,15 +334,15 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         );
       case 'paragraph':
         return (
-          <p key={key} className="whitespace-pre-wrap break-words text-[13.5px] leading-[1.7]">
+          <p key={key} className="whitespace-pre-wrap break-words text-[14.5px] leading-relaxed my-2.5 first:mt-0 last:mb-0">
             {renderInline(block.content, `${key}-paragraph`, tone)}
           </p>
         );
       case 'unordered-list':
         return (
-          <ul key={key} className="list-disc space-y-1 pl-5 text-[13.5px] leading-[1.7] marker:text-muted-foreground/40">
+          <ul key={key} className={`list-disc space-y-1.5 pl-6 my-3 text-[14.5px] leading-relaxed ${tone === 'inverse' ? 'marker:text-primary-foreground/50' : 'marker:text-muted-foreground/60'}`}>
             {block.items.map((item, itemIndex) => (
-              <li key={`${key}-item-${itemIndex}`} className="break-words pl-0.5">
+              <li key={`${key}-item-${itemIndex}`} className="break-words pl-1">
                 {renderInline(item, `${key}-item-${itemIndex}`, tone)}
               </li>
             ))}
@@ -338,9 +350,9 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         );
       case 'ordered-list':
         return (
-          <ol key={key} className="list-decimal space-y-1 pl-5 text-[13.5px] leading-[1.7] marker:text-muted-foreground/40">
+          <ol key={key} className={`list-decimal space-y-1.5 pl-6 my-3 text-[14.5px] leading-relaxed ${tone === 'inverse' ? 'marker:text-primary-foreground/50' : 'marker:text-muted-foreground/60'}`}>
             {block.items.map((item, itemIndex) => (
-              <li key={`${key}-item-${itemIndex}`} className="break-words pl-0.5">
+              <li key={`${key}-item-${itemIndex}`} className="break-words pl-1">
                 {renderInline(item, `${key}-item-${itemIndex}`, tone)}
               </li>
             ))}
@@ -350,20 +362,18 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
         return <CodeBlock key={key} code={block.content} language={block.language} tone={tone} />;
       case 'blockquote':
         return (
-          <div key={key} className={`rounded-r-xl px-3.5 py-2.5 ${styles.quote}`}>
-            <div className="space-y-2">
-              {renderBlocks(parseBlocks(block.content), `${key}-quote`, tone)}
-            </div>
+          <div key={key} className={styles.quote}>
+            {renderBlocks(parseBlocks(block.content), `${key}-quote`, tone)}
           </div>
         );
       case 'table':
         return (
-          <div key={key} className={`overflow-x-auto rounded-xl ${styles.tableWrap}`}>
-            <table className="min-w-full border-collapse text-left text-[13px]">
+          <div key={key} className={`overflow-x-auto ${styles.tableWrap}`}>
+            <table className="w-full border-collapse text-left text-[13px]">
               <thead className={styles.tableHead}>
                 <tr>
                   {block.headers.map((header, headerIndex) => (
-                    <th key={`${key}-header-${headerIndex}`} className="px-3 py-2 font-semibold whitespace-nowrap text-[12.5px]">
+                    <th key={`${key}-header-${headerIndex}`} className="px-3.5 py-2.5 font-semibold whitespace-nowrap text-[12.5px] uppercase tracking-wider opacity-90">
                       {renderInline(header, `${key}-header-${headerIndex}`, tone)}
                     </th>
                   ))}
@@ -373,7 +383,7 @@ function renderBlocks(blocks: MarkdownBlock[], keyPrefix: string, tone: Markdown
                 {block.rows.map((row, rowIndex) => (
                   <tr key={`${key}-row-${rowIndex}`} className={styles.tableRow}>
                     {row.map((cell, cellIndex) => (
-                      <td key={`${key}-cell-${rowIndex}-${cellIndex}`} className={`px-3 py-2 align-top whitespace-pre-wrap ${styles.tableCell}`}>
+                      <td key={`${key}-cell-${rowIndex}-${cellIndex}`} className={`px-3.5 py-2 align-top whitespace-pre-wrap ${styles.tableCell}`}>
                         {renderInline(cell, `${key}-cell-${rowIndex}-${cellIndex}`, tone)}
                       </td>
                     ))}
@@ -397,7 +407,7 @@ export function MarkdownRenderer({ content, className = '', tone = 'default' }: 
   if (!trimmed) return null;
 
   return (
-    <div className={`space-y-2.5 break-words text-left ${TONE_STYLES[tone].root} ${className}`.trim()}>
+    <div className={`markdown-body break-words text-left text-[14.5px] leading-relaxed ${TONE_STYLES[tone].root} ${className}`.trim()}>
       {renderBlocks(blocks, 'markdown', tone)}
     </div>
   );
