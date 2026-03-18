@@ -426,28 +426,28 @@ export default function BackendLogs() {
         </div>
       )}
 
-      <div className="bg-card border border-border rounded-xl shadow-sm p-3 sm:p-4 space-y-3 flex-shrink-0">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <label className="space-y-1 md:col-span-2">
-            <span className="text-xs font-medium text-muted-foreground">关键字筛选</span>
-            <div className="relative">
+      <div className="bg-card border border-border rounded-lg shadow-sm p-3 space-y-3 flex-shrink-0">
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 flex-1 min-w-[200px]">
+            <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">关键字</span>
+            <div className="relative flex-1">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <input
                 type="text"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder="搜索日志内容"
-                className="w-full bg-background border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-foreground"
+                className="w-full bg-background border border-border rounded-md pl-9 pr-3 py-1.5 text-sm text-foreground h-8"
               />
             </div>
           </label>
 
-          <label className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">输出流</span>
+          <label className="flex items-center gap-2 w-[160px]">
+            <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">输出流</span>
             <select
               value={streamFilter}
               onChange={e => setStreamFilter(e.target.value as 'ALL' | 'stdout' | 'stderr')}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+              className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground h-8"
             >
               <option value="ALL">全部输出</option>
               <option value="stdout">仅 stdout</option>
@@ -455,12 +455,12 @@ export default function BackendLogs() {
             </select>
           </label>
 
-          <label className="space-y-1">
-            <span className="text-xs font-medium text-muted-foreground">日志级别</span>
+          <label className="flex items-center gap-2 w-[160px]">
+            <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">级别</span>
             <select
               value={levelFilter}
               onChange={e => setLevelFilter(e.target.value as 'ALL' | BackendLogLevel)}
-              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+              className="w-full bg-background border border-border rounded-md px-3 py-1.5 text-sm text-foreground h-8"
             >
               <option value="ALL">全部级别</option>
               {LEVEL_OPTIONS.map(level => (
@@ -468,24 +468,19 @@ export default function BackendLogs() {
               ))}
             </select>
           </label>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={toggleErrorOnlyMode}
-            className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+            className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors h-8 ${
               errorOnlyMode
                 ? 'border-red-500/40 bg-red-500/12 text-red-700 dark:text-red-300'
                 : 'border-border bg-background text-foreground hover:bg-muted'
             }`}
           >
             <CircleAlert className="w-4 h-4" />
-            {errorOnlyMode ? '仅错误模式已开启' : '仅错误（ERROR + CRITICAL）'}
+            {errorOnlyMode ? '仅错误' : '仅错误'}
           </button>
-          <span className="text-xs text-muted-foreground">
-            一键只看 ERROR / CRITICAL；如果再选具体级别，可继续缩小到单一级别。
-          </span>
         </div>
 
         {(loggerOptions.length > 0 || hasLoggerFilter) && (
@@ -516,7 +511,7 @@ export default function BackendLogs() {
                 value={loggerSearchText}
                 onChange={e => setLoggerSearchText(e.target.value)}
                 placeholder="搜索 logger 名称，如 Zoaholic / httpx / watchfiles"
-                className="w-full bg-background border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-foreground"
+                className="w-full bg-background border border-border rounded-md pl-9 pr-3 py-1.5 text-sm text-foreground h-8"
               />
             </div>
 
@@ -549,7 +544,7 @@ export default function BackendLogs() {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           <button
             type="button"
             onClick={() => setShowConfig(prev => !prev)}
@@ -570,18 +565,13 @@ export default function BackendLogs() {
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-muted border border-border">
             <Server className="w-3.5 h-3.5" /> 后端当前保留 {effectiveBufferSize} 行
           </span>
-          <span className="text-[11px] opacity-80">
-            自动刷新不会自动跳到最新一行，避免打断阅读。
-            {hasLoggerFilter ? ` 当前仅显示 logger：${loggerFilter}` : ''}
-            {errorOnlyMode ? ' 当前启用仅错误模式。' : ''}
-          </span>
           {hasLoggerFilter && (
-            <button type="button" onClick={() => setLoggerFilter('ALL')} className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted">
+            <button type="button" onClick={() => setLoggerFilter('ALL')} className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2 py-0.5 text-[10px] text-foreground hover:bg-muted">
               清除 logger 筛选
             </button>
           )}
           {errorOnlyMode && (
-            <button type="button" onClick={toggleErrorOnlyMode} className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] text-red-700 dark:text-red-300 hover:bg-red-500/15">
+            <button type="button" onClick={toggleErrorOnlyMode} className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] text-red-700 dark:text-red-300 hover:bg-red-500/15">
               退出仅错误模式
             </button>
           )}
@@ -595,7 +585,7 @@ export default function BackendLogs() {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 min-w-0 bg-card border border-border rounded-xl overflow-hidden flex flex-col">
+      <div className="flex-1 min-h-0 min-w-0 bg-card border border-border rounded-lg overflow-hidden flex flex-col">
         {items.length === 0 && !loading ? (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground px-6 py-16 text-center">
             <Terminal className="w-12 h-12 mb-4 opacity-50" />
@@ -611,34 +601,32 @@ export default function BackendLogs() {
                 return (
                   <div
                     key={item.id}
-                    className={`grid grid-cols-1 xl:grid-cols-[132px_132px_88px_minmax(0,1fr)] gap-2 xl:gap-3 border-b border-border/60 border-l-4 px-3 py-2 hover:bg-muted/40 ${levelMeta.rowClasses}`}
+                    className={`flex flex-col lg:flex-row lg:items-start gap-1 lg:gap-3 border-b border-border/60 border-l-4 px-2.5 sm:px-3 py-2 hover:bg-muted/40 ${levelMeta.rowClasses}`}
                   >
-                    <div className="text-muted-foreground whitespace-nowrap">{formatTime(item.captured_at)}</div>
-                    <div>
+                    <div className="flex items-center gap-2 lg:w-[280px] flex-shrink-0 flex-wrap lg:pt-0.5">
+                      <span className="text-muted-foreground whitespace-nowrap text-[11px] font-medium opacity-80 mt-[1px]">{formatTime(item.captured_at)}</span>
                       <span
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 border text-[11px] font-semibold tracking-wide ${levelMeta.badgeClasses}`}
+                        className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 border text-[10px] font-semibold tracking-wide flex-shrink-0 ${levelMeta.badgeClasses}`}
                       >
                         <LevelIcon className="w-3.5 h-3.5" />
                         {levelMeta.label}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => item.logger_name && setLoggerFilter(item.logger_name)}
+                        disabled={!item.logger_name}
+                        className={`inline-flex items-center rounded px-1.5 py-0.5 border text-[10px] truncate max-w-[180px] lg:max-w-[130px] flex-shrink-0 ${item.logger_name ? 'bg-muted border-border text-foreground hover:bg-muted/80 cursor-pointer' : 'bg-muted border-border opacity-80 cursor-default'}`}
+                      >{getSourceLabel(item)}</button>
                     </div>
-                    <div>
+                    <div className="min-w-0 flex-1 flex flex-row items-start gap-1.5 lg:gap-3">
                       <span
-                        className={`inline-flex items-center rounded-md px-2 py-1 border text-[11px] font-medium ${getStreamBadgeClasses(item.stream)}`}
+                        className={`inline-flex items-center justify-center rounded-md px-1.5 py-[1px] border text-[9px] font-bold tracking-wider w-[38px] lg:w-[44px] flex-shrink-0 h-fit mt-[4px] lg:mt-[4px] ${getStreamBadgeClasses(item.stream)}`}
                       >
                         {item.stream}
                       </span>
-                    </div>
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <button
-                          type="button"
-                          onClick={() => item.logger_name && setLoggerFilter(item.logger_name)}
-                          disabled={!item.logger_name}
-                          className={`inline-flex items-center rounded px-1.5 py-0.5 border ${item.logger_name ? 'bg-muted border-border text-foreground hover:bg-muted/80 cursor-pointer' : 'bg-muted border-border opacity-80 cursor-default'}`}
-                        >{getSourceLabel(item)}</button>
+                      <div className="text-foreground whitespace-pre-wrap break-words leading-5 min-w-0 flex-1">
+                        {item.message}
                       </div>
-                      <div className="text-foreground whitespace-pre-wrap break-words leading-5 min-w-0">{item.message}</div>
                     </div>
                   </div>
                 );
