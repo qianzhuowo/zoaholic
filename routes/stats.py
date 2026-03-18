@@ -184,6 +184,9 @@ class BackendLogEntry(BaseModel):
     id: int
     captured_at: datetime
     stream: Literal["stdout", "stderr"]
+    level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = None
+    logger_name: Optional[str] = None
+    source: Literal["stream", "logger"] = "stream"
     message: str
 
     @field_serializer("captured_at")
@@ -1457,11 +1460,22 @@ async def get_backend_logs(
     since_id: Optional[int] = Query(None, ge=0, description="Return log lines whose id is greater than this value"),
     search: Optional[str] = Query(None, description="Keyword filter for backend log content"),
     stream: Optional[str] = Query(None, description="Filter by output stream: stdout or stderr"),
+    level: Optional[str] = Query(None, description="Filter by log level: debug, info, warning, error or critical"),
+    level_group: Optional[str] = Query(None, description="Filter by log level group: errors (ERROR + CRITICAL)"),
+    logger_name: Optional[str] = Query(None, description="Filter by logger name (case-insensitive exact match)"),
     token: str = Depends(verify_admin_api_key),
 ):
     normalized_stream = (stream or "").strip().lower() or None
     if normalized_stream not in {None, "stdout", "stderr"}:
         raise HTTPException(status_code=400, detail="Invalid stream. Allowed values: stdout, stderr")
+
+    normalized_level = (level or "").strip().upper() or None
+    if normalized_level not in {None, "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise HTTPException(status_code=400, detail="Invalid level. Allowed values: debug, info, warning, error, critical")
+
+    normalized_level_group = (level_group or "").strip().lower() or None
+    if normalized_level_group not in {None, "errors"}:
+        raise HTTPException(status_code=400, detail="Invalid level_group. Allowed values: errors")
 
     from core.log_config import get_backend_log_entries
 
@@ -1470,6 +1484,9 @@ async def get_backend_logs(
         limit=limit,
         search=search,
         stream=normalized_stream,
+        level=normalized_level,
+        level_group=normalized_level_group,
+        logger_name=logger_name,
     )
 
     items = [BackendLogEntry(**item) for item in snapshot["items"]]

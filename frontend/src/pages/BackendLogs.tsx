@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
 import {
@@ -14,12 +14,22 @@ import {
   Settings2,
   ChevronDown,
   ChevronRight,
+  Bug,
+  Info,
+  CircleAlert,
+  AlertOctagon,
 } from 'lucide-react';
+
+type BackendLogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+type BackendLogSource = 'stream' | 'logger';
 
 interface BackendLogEntry {
   id: number;
   captured_at: string;
   stream: 'stdout' | 'stderr';
+  level?: BackendLogLevel | null;
+  logger_name?: string | null;
+  source: BackendLogSource;
   message: string;
 }
 
@@ -36,6 +46,71 @@ const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_BUFFER_SIZE = 200;
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 400, 800];
 const BUFFER_SIZE_OPTIONS = [200, 400, 800, 1200, 2000, 5000];
+const LOGGER_CHIP_COLLAPSED_LIMIT = 12;
+const LEVEL_OPTIONS: BackendLogLevel[] = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'];
+
+function getLevelMeta(level?: BackendLogLevel | null) {
+  switch (level) {
+    case 'DEBUG':
+      return {
+        label: 'DEBUG',
+        icon: Bug,
+        badgeClasses: 'text-slate-700 dark:text-slate-200 bg-slate-500/15 border-slate-500/30',
+        rowClasses: 'border-l-slate-500/50 bg-slate-500/[0.07]',
+      };
+    case 'INFO':
+      return {
+        label: 'INFO',
+        icon: Info,
+        badgeClasses: 'text-sky-700 dark:text-sky-300 bg-sky-500/15 border-sky-500/30',
+        rowClasses: 'border-l-sky-500/50 bg-sky-500/[0.07]',
+      };
+    case 'WARNING':
+      return {
+        label: 'WARNING',
+        icon: AlertTriangle,
+        badgeClasses: 'text-amber-800 dark:text-amber-300 bg-amber-500/15 border-amber-500/30',
+        rowClasses: 'border-l-amber-500/60 bg-amber-500/[0.08]',
+      };
+    case 'ERROR':
+      return {
+        label: 'ERROR',
+        icon: CircleAlert,
+        badgeClasses: 'text-rose-700 dark:text-rose-300 bg-rose-500/15 border-rose-500/30',
+        rowClasses: 'border-l-rose-500/70 bg-rose-500/[0.08]',
+      };
+    case 'CRITICAL':
+      return {
+        label: 'CRITICAL',
+        icon: AlertOctagon,
+        badgeClasses: 'text-red-700 dark:text-red-300 bg-red-500/15 border-red-500/35 shadow-[inset_0_0_0_1px_rgba(239,68,68,0.15)]',
+        rowClasses: 'border-l-red-600/80 bg-red-500/[0.10]',
+      };
+    default:
+      return {
+        label: 'STREAM',
+        icon: Terminal,
+        badgeClasses: 'text-muted-foreground bg-muted border-border',
+        rowClasses: 'border-l-border',
+      };
+  }
+}
+
+function getStreamBadgeClasses(stream: BackendLogEntry['stream']) {
+  return stream === 'stderr'
+    ? 'text-red-700 dark:text-red-300 bg-red-500/12 border-red-500/25'
+    : 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/12 border-emerald-500/25';
+}
+
+function getSourceLabel(item: BackendLogEntry) {
+  if (item.source === 'logger' && item.logger_name) {
+    return item.logger_name;
+  }
+  if (item.source === 'logger') {
+    return 'logger';
+  }
+  return 'raw stream';
+}
 
 function formatTime(ts: string) {
   try {
@@ -63,8 +138,13 @@ export default function BackendLogs() {
   const [loading, setLoading] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [error, setError] = useState('');
+  const [errorOnlyMode, setErrorOnlyMode] = useState(false);
+  const [loggerFilter, setLoggerFilter] = useState('ALL');
+  const [loggerSearchText, setLoggerSearchText] = useState('');
+  const [showAllLoggerOptions, setShowAllLoggerOptions] = useState(false);
   const [configMessage, setConfigMessage] = useState('');
   const [search, setSearch] = useState('');
+  const [levelFilter, setLevelFilter] = useState<'ALL' | BackendLogLevel>('ALL');
   const [streamFilter, setStreamFilter] = useState<'ALL' | 'stdout' | 'stderr'>('ALL');
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [bufferSize, setBufferSize] = useState(DEFAULT_BUFFER_SIZE);
@@ -75,6 +155,30 @@ export default function BackendLogs() {
   const [effectiveBufferSize, setEffectiveBufferSize] = useState(DEFAULT_BUFFER_SIZE);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToBottomRef = useRef(false);
+
+  const loggerOptions = useMemo(() => {
+    const names = new Set<string>();
+    items.forEach(item => {
+      const name = item.logger_name?.trim();
+      if (name) names.add(name);
+    });
+    if (loggerFilter !== 'ALL') names.add(loggerFilter);
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  }, [items, loggerFilter]);
+
+  const hasLoggerFilter = loggerFilter !== 'ALL';
+
+  const filteredLoggerOptions = useMemo(() => {
+    const keyword = loggerSearchText.trim().toLowerCase();
+    if (!keyword) return loggerOptions;
+    return loggerOptions.filter(name => name.toLowerCase().includes(keyword));
+  }, [loggerOptions, loggerSearchText]);
+
+  const visibleLoggerOptions = showAllLoggerOptions
+    ? filteredLoggerOptions
+    : filteredLoggerOptions.slice(0, LOGGER_CHIP_COLLAPSED_LIMIT);
+
+  const hasHiddenLoggerOptions = filteredLoggerOptions.length > LOGGER_CHIP_COLLAPSED_LIMIT;
 
   const scrollToBottom = () => {
     if (!scrollerRef.current) return;
@@ -113,6 +217,9 @@ export default function BackendLogs() {
 
       if (search.trim()) queryParams.set('search', search.trim());
       if (streamFilter !== 'ALL') queryParams.set('stream', streamFilter);
+      if (errorOnlyMode) queryParams.set('level_group', 'errors');
+      if (levelFilter !== 'ALL') queryParams.set('level', levelFilter);
+      if (loggerFilter !== 'ALL') queryParams.set('logger_name', loggerFilter);
 
       const res = await apiFetch(`/v1/backend_logs?${queryParams.toString()}`);
       if (!res.ok) {
@@ -131,6 +238,16 @@ export default function BackendLogs() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleErrorOnlyMode = () => {
+    setErrorOnlyMode(prev => {
+      const next = !prev;
+      if (next && !['ALL', 'ERROR', 'CRITICAL'].includes(levelFilter)) {
+        setLevelFilter('ALL');
+      }
+      return next;
+    });
   };
 
   const handlePageSizeChange = (value: number) => {
@@ -185,7 +302,7 @@ export default function BackendLogs() {
 
   useEffect(() => {
     fetchBackendLogs({ scrollAfterLoad: true });
-  }, [token, search, streamFilter, pageSize]);
+  }, [token, search, errorOnlyMode, levelFilter, streamFilter, loggerFilter, pageSize]);
 
   useEffect(() => {
     if (!autoRefresh || !token) return;
@@ -194,13 +311,17 @@ export default function BackendLogs() {
     }, POLL_INTERVAL_MS);
 
     return () => window.clearInterval(timer);
-  }, [autoRefresh, token, search, streamFilter, pageSize]);
+  }, [autoRefresh, token, search, errorOnlyMode, levelFilter, streamFilter, loggerFilter, pageSize]);
 
   useEffect(() => {
     if (!pendingScrollToBottomRef.current) return;
     scrollToBottom();
     pendingScrollToBottomRef.current = false;
   }, [items]);
+
+  useEffect(() => {
+    setShowAllLoggerOptions(false);
+  }, [loggerSearchText]);
 
   const isBufferSmallerThanPage = bufferSize < pageSize;
 
@@ -210,7 +331,7 @@ export default function BackendLogs() {
         <div className="min-w-0">
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground">后台日志</h1>
           <p className="text-muted-foreground mt-1 text-sm sm:text-base">
-            查看当前实例的 stdout / stderr 输出，适合 Render、Railway 等平台快速排查部署日志。
+            查看当前实例的 stdout / stderr 输出，并按日志级别与 logger 来源区分，适合 Render、Railway 等平台快速排查部署日志。
           </p>
         </div>
 
@@ -306,7 +427,7 @@ export default function BackendLogs() {
       )}
 
       <div className="bg-card border border-border rounded-xl shadow-sm p-3 sm:p-4 space-y-3 flex-shrink-0">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <label className="space-y-1 md:col-span-2">
             <span className="text-xs font-medium text-muted-foreground">关键字筛选</span>
             <div className="relative">
@@ -333,7 +454,100 @@ export default function BackendLogs() {
               <option value="stderr">仅 stderr</option>
             </select>
           </label>
+
+          <label className="space-y-1">
+            <span className="text-xs font-medium text-muted-foreground">日志级别</span>
+            <select
+              value={levelFilter}
+              onChange={e => setLevelFilter(e.target.value as 'ALL' | BackendLogLevel)}
+              className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground"
+            >
+              <option value="ALL">全部级别</option>
+              {LEVEL_OPTIONS.map(level => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </label>
         </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={toggleErrorOnlyMode}
+            className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+              errorOnlyMode
+                ? 'border-red-500/40 bg-red-500/12 text-red-700 dark:text-red-300'
+                : 'border-border bg-background text-foreground hover:bg-muted'
+            }`}
+          >
+            <CircleAlert className="w-4 h-4" />
+            {errorOnlyMode ? '仅错误模式已开启' : '仅错误（ERROR + CRITICAL）'}
+          </button>
+          <span className="text-xs text-muted-foreground">
+            一键只看 ERROR / CRITICAL；如果再选具体级别，可继续缩小到单一级别。
+          </span>
+        </div>
+
+        {(loggerOptions.length > 0 || hasLoggerFilter) && (
+          <div className="space-y-2">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-medium">快捷 logger 筛选</span>
+                <span>支持搜索和折叠，logger 很多时也更好找。</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>共 {loggerOptions.length} 个 logger</span>
+                {hasHiddenLoggerOptions && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllLoggerOptions(prev => !prev)}
+                    className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-foreground hover:bg-muted"
+                  >
+                    {showAllLoggerOptions ? '收起' : `展开全部 (${filteredLoggerOptions.length})`}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                value={loggerSearchText}
+                onChange={e => setLoggerSearchText(e.target.value)}
+                placeholder="搜索 logger 名称，如 Zoaholic / httpx / watchfiles"
+                className="w-full bg-background border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-foreground"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setLoggerFilter('ALL')}
+                className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                  !hasLoggerFilter
+                    ? 'border-primary bg-primary text-primary-foreground'
+                    : 'border-border bg-background text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                全部 logger
+              </button>
+              {visibleLoggerOptions.map(name => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => setLoggerFilter(name)}
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs transition-colors ${loggerFilter === name ? 'border-primary bg-primary/12 text-primary' : 'border-border bg-background text-foreground hover:bg-muted'}`}
+                >{name}</button>
+              ))}
+            </div>
+            {loggerSearchText.trim() && filteredLoggerOptions.length === 0 && (
+              <div className="text-xs text-muted-foreground px-1">
+                没找到匹配的 logger，可清空搜索后重试。
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <button
@@ -358,7 +572,19 @@ export default function BackendLogs() {
           </span>
           <span className="text-[11px] opacity-80">
             自动刷新不会自动跳到最新一行，避免打断阅读。
+            {hasLoggerFilter ? ` 当前仅显示 logger：${loggerFilter}` : ''}
+            {errorOnlyMode ? ' 当前启用仅错误模式。' : ''}
           </span>
+          {hasLoggerFilter && (
+            <button type="button" onClick={() => setLoggerFilter('ALL')} className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-foreground hover:bg-muted">
+              清除 logger 筛选
+            </button>
+          )}
+          {errorOnlyMode && (
+            <button type="button" onClick={toggleErrorOnlyMode} className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] text-red-700 dark:text-red-300 hover:bg-red-500/15">
+              退出仅错误模式
+            </button>
+          )}
         </div>
 
         {error && (
@@ -374,33 +600,46 @@ export default function BackendLogs() {
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground px-6 py-16 text-center">
             <Terminal className="w-12 h-12 mb-4 opacity-50" />
             <p className="text-sm">当前没有可展示的后台日志</p>
-            <p className="text-xs mt-2 opacity-80">可尝试切换筛选条件，或等待应用产生新的 stdout / stderr 输出。</p>
+            <p className="text-xs mt-2 opacity-80">可尝试切换关键字、输出流、日志级别、仅错误模式或 logger 名称筛选，或等待应用产生新的日志。</p>
           </div>
         ) : (
           <div ref={scrollerRef} className="flex-1 min-h-0 overflow-auto bg-background/60">
             <div className="w-full min-w-0 font-mono text-xs">
               {items.map(item => {
-                const isErrorStream = item.stream === 'stderr';
+                const levelMeta = getLevelMeta(item.level);
+                const LevelIcon = levelMeta.icon;
                 return (
                   <div
                     key={item.id}
-                    className={`grid grid-cols-1 sm:grid-cols-[120px_78px_minmax(0,1fr)] gap-2 sm:gap-3 px-3 py-2 border-b border-border/60 hover:bg-muted/40 ${
-                      isErrorStream ? 'bg-red-500/5' : ''
-                    }`}
+                    className={`grid grid-cols-1 xl:grid-cols-[132px_132px_88px_minmax(0,1fr)] gap-2 xl:gap-3 border-b border-border/60 border-l-4 px-3 py-2 hover:bg-muted/40 ${levelMeta.rowClasses}`}
                   >
                     <div className="text-muted-foreground whitespace-nowrap">{formatTime(item.captured_at)}</div>
                     <div>
                       <span
-                        className={`inline-flex items-center rounded px-1.5 py-0.5 border ${
-                          isErrorStream
-                            ? 'text-red-600 dark:text-red-400 bg-red-500/10 border-red-500/20'
-                            : 'text-blue-600 dark:text-blue-400 bg-blue-500/10 border-blue-500/20'
-                        }`}
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 border text-[11px] font-semibold tracking-wide ${levelMeta.badgeClasses}`}
+                      >
+                        <LevelIcon className="w-3.5 h-3.5" />
+                        {levelMeta.label}
+                      </span>
+                    </div>
+                    <div>
+                      <span
+                        className={`inline-flex items-center rounded-md px-2 py-1 border text-[11px] font-medium ${getStreamBadgeClasses(item.stream)}`}
                       >
                         {item.stream}
                       </span>
                     </div>
-                    <div className="text-foreground whitespace-pre-wrap break-words leading-5 min-w-0">{item.message}</div>
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                        <button
+                          type="button"
+                          onClick={() => item.logger_name && setLoggerFilter(item.logger_name)}
+                          disabled={!item.logger_name}
+                          className={`inline-flex items-center rounded px-1.5 py-0.5 border ${item.logger_name ? 'bg-muted border-border text-foreground hover:bg-muted/80 cursor-pointer' : 'bg-muted border-border opacity-80 cursor-default'}`}
+                        >{getSourceLabel(item)}</button>
+                      </div>
+                      <div className="text-foreground whitespace-pre-wrap break-words leading-5 min-w-0">{item.message}</div>
+                    </div>
                   </div>
                 );
               })}
