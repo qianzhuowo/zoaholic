@@ -963,7 +963,7 @@ export default function Channels() {
                           value={keyObj.key}
                           onChange={e => updateKey(idx, e.target.value)}
                           onPaste={e => handleKeyPaste(e, idx)}
-                          placeholder="sk-..."
+                          placeholder="sk-... / zk-..."
                           className={`flex-1 bg-transparent border-none text-sm font-mono outline-none min-w-0 ${keyObj.disabled ? 'text-muted-foreground line-through' : 'text-foreground'}`}
                         />
                         <button onClick={() => toggleKeyDisabled(idx)} className={keyObj.disabled ? 'text-muted-foreground' : 'text-emerald-500'} title={keyObj.disabled ? "启用" : "禁用"}>

@@ -75,7 +75,7 @@ def _prepend_system_prompt(request: RequestModel, system_prompt: str) -> Request
                 new_messages.append(msg)
         
         # 创建新的请求对象
-        request_dict = request.model_dump(exclude={'messages'})
+        request_dict = request.model_dump(exclude={'messages'}, exclude_unset=True)
         request_dict['messages'] = [m.model_dump() if hasattr(m, 'model_dump') else m for m in new_messages]
         return RequestModel(**request_dict)
     else:
@@ -84,7 +84,7 @@ def _prepend_system_prompt(request: RequestModel, system_prompt: str) -> Request
         new_messages = [system_message] + list(request.messages)
         
         # 创建新的请求对象
-        request_dict = request.model_dump(exclude={'messages'})
+        request_dict = request.model_dump(exclude={'messages'}, exclude_unset=True)
         request_dict['messages'] = [m.model_dump() if hasattr(m, 'model_dump') else m for m in new_messages]
         return RequestModel(**request_dict)
 

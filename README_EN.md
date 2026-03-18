@@ -145,7 +145,7 @@ Render usually injects `PORT` automatically; Zoaholic will read `PORT` as the li
 | `CONFIG_YAML` | raw YAML | Provide seed config via env var.
 | `CONFIG_YAML_BASE64` | base64(YAML) | Recommended for multiline YAML. Loaded once and persisted into DB.
 | `CONFIG_URL` | `https://.../api.yaml` | Fetch seed config from URL and persist into DB.
-| `ADMIN_API_KEY` / `ADMIN_API_KEYS` | `sk-...` | If no config sources exist, create a minimal boot config with only admin key(s).
+| `ADMIN_API_KEY` / `ADMIN_API_KEYS` | `sk-...` / `zk-...` | If no config sources exist, create a minimal boot config with only admin key(s).
 | `DEBUG` | `true/false` | Enable debug logs.
 
 ---
@@ -207,8 +207,8 @@ python main.py
 
 `/v1/*` endpoints are gateway APIs and require an API key by default:
 
-- `Authorization: Bearer sk-...`
-- or `x-api-key: sk-...`
+- `Authorization: Bearer sk-...` or `Authorization: Bearer zk-...`
+- or `x-api-key: sk-...` / `x-api-key: zk-...`
 
 Please configure `api_keys` in the admin console first.
 

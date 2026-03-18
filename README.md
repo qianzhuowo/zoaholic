@@ -135,7 +135,7 @@ docker run --rm -p 8000:8000 \
 | `CONFIG_YAML` | YAML 文本 | 直接用环境变量提供配置种子。 |
 | `CONFIG_YAML_BASE64` | base64(YAML) | 推荐方式：把 `api.yaml` base64 后放这里，首次启动会写入 DB。 |
 | `CONFIG_URL` | `https://.../api.yaml` | 从 URL 拉取配置种子（首次写入 DB）。 |
-| `ADMIN_API_KEY` / `ADMIN_API_KEYS` | `sk-...` | 当没有任何配置来源时，生成一个“最小可启动配置”（只含管理员 key），便于先启动再进控制台完善配置。 |
+| `ADMIN_API_KEY` / `ADMIN_API_KEYS` | `sk-...` / `zk-...` | 当没有任何配置来源时，生成一个“最小可启动配置”（只含管理员 key），便于先启动再进控制台完善配置。 |
 | `DEBUG` | `true/false` | 开启调试日志。 |
 
 ---
@@ -190,7 +190,7 @@ python main.py
 
 ### 1）为什么服务启动后 /v1 接口 403？
 
-`/v1/*` 是网关接口，默认必须带 API Key（`Authorization: Bearer sk-...` 或 `x-api-key`）。
+`/v1/*` 是网关接口，默认必须带 API Key（`Authorization: Bearer sk-/zk-...` 或 `x-api-key`）。
 请先在控制台配置 `api_keys`。
 
 ### 2）我不想填 JWT_SECRET 行不行？

@@ -25,6 +25,10 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from core.log_config import logger
+from core.utils import (
+    build_claude_thinking_payload,
+    apply_claude_thinking_constraints,
+)
 from core.plugins import (
     register_request_interceptor,
     unregister_request_interceptor,
@@ -149,15 +153,11 @@ def apply_thinking_config(payload: Dict[str, Any], budget_tokens: int) -> None:
         payload: 请求 payload
         budget_tokens: thinking budget tokens
     """
-    payload["thinking"] = {
-        "type": "enabled",
-        "budget_tokens": budget_tokens
-    }
+    payload["thinking"] = build_claude_thinking_payload(
+        budget_tokens=budget_tokens, thinking_type="enabled")
 
     # thinking 模式要求 temperature=1，且不能有 top_p/top_k
-    payload["temperature"] = 1
-    payload.pop("top_p", None)
-    payload.pop("top_k", None)
+    apply_claude_thinking_constraints(payload)
 
     logger.debug(f"[claude_tools] Applied thinking config: budget_tokens={budget_tokens}")
 

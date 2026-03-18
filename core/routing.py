@@ -15,7 +15,7 @@ from core.utils import (
     circular_list_encoder,
     provider_api_circular_list,
 )
-from utils import safe_get
+from utils import safe_get, is_local_api_key
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -140,7 +140,7 @@ async def get_provider_rules(
             models_list = []
 
             # api_keys 中 api 为 sk- 时，表示继承 api_keys，将 api_keys 中的 api key 当作 渠道
-            if provider_name.startswith("sk-") and provider_name in app.state.api_list:
+            if is_local_api_key(provider_name) and provider_name in app.state.api_list:
                 if app.state.models_list.get(provider_name):
                     models_list = app.state.models_list[provider_name]
                 else:
@@ -199,7 +199,7 @@ def get_provider_list(
     
     for item in provider_rules:
         provider_name = item.split("/")[0]
-        if provider_name.startswith("sk-") and provider_name in app.state.api_list:
+        if is_local_api_key(provider_name) and provider_name in app.state.api_list:
             # 加载本地聚合器 Key 的分组
             try:
                 local_index = app.state.api_list.index(provider_name)
@@ -348,7 +348,7 @@ async def get_right_order_providers(
             model_dict = get_model_dict(provider)
             original_model = model_dict[request_model]
             provider_name = provider['provider']
-            if provider_name.startswith("sk-") and provider_name in app.state.api_list:
+            if is_local_api_key(provider_name) and provider_name in app.state.api_list:
                 # Local API keys are added directly as their limits are handled elsewhere
                 available_providers.append(provider)
                 continue

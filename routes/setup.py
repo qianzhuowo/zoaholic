@@ -133,7 +133,7 @@ async def _upsert_admin_user(username: str, password: str, jwt_secret: str) -> N
 
 
 def _generate_admin_api_key() -> str:
-    # 尽量保持 sk- 前缀风格
+    # 默认保持 sk- 前缀风格（同时兼容历史/手填 zk-）
     return "sk-" + secrets.token_urlsafe(36)
 
 

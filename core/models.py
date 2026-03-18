@@ -112,7 +112,7 @@ class ResponseFormat(BaseModel):
 
 class Thinking(BaseModel):
     budget_tokens: Optional[int] = None
-    type: Optional[Literal["enabled", "disabled"]] = None
+    type: Optional[str] = None
 
 class StreamOptions(BaseModel):
     include_usage: Optional[bool] = None
@@ -124,8 +124,8 @@ class RequestModel(BaseRequest):
     top_logprobs: Optional[int] = None
     stream: Optional[bool] = None
     include_usage: Optional[bool] = None
-    temperature: Optional[float] = 0.5
-    top_p: Optional[float] = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     top_k: Optional[int] = None
     min_p: Optional[float] = None
     max_tokens: Optional[int] = None

@@ -128,6 +128,43 @@ class BaseAPI:
             self.chat_url = api_url
             self.embeddings = urlunparse(parsed_url[:2] + (before_v1 + "/v1beta/embeddings",) + ("",) * 3)
 
+
+def build_claude_thinking_payload(thinking=None, *, budget_tokens=None, thinking_type=None):
+    """构造 Claude thinking 配置，仅保留有值字段。"""
+
+    payload = {}
+
+    if thinking is not None:
+        if isinstance(thinking, dict):
+            source_budget = thinking.get("budget_tokens")
+            source_type = thinking.get("type")
+        else:
+            source_budget = getattr(thinking, "budget_tokens", None)
+            source_type = getattr(thinking, "type", None)
+
+        if source_budget is not None:
+            payload["budget_tokens"] = source_budget
+        if source_type is not None and str(source_type).strip():
+            payload["type"] = str(source_type).strip()
+
+    if budget_tokens is not None:
+        payload["budget_tokens"] = budget_tokens
+    if thinking_type is not None and str(thinking_type).strip():
+        payload["type"] = str(thinking_type).strip()
+
+    return payload or None
+
+
+def apply_claude_thinking_constraints(payload: dict) -> None:
+    """应用 Claude thinking 模式下的采样参数约束。"""
+
+    if not isinstance(payload, dict):
+        return
+
+    payload["temperature"] = 1
+    payload.pop("top_p", None)
+    payload.pop("top_k", None)
+
 def get_tools_mode(provider) -> str:
     """
     获取工具调用支持模式

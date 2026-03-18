@@ -69,7 +69,7 @@ async def fetch_channel_models(
     {
         "engine": "gpt",  // 渠道类型 ID
         "base_url": "https://api.openai.com/v1",
-        "api_key": "sk-xxx",
+        "api_key": "sk-xxx 或 zk-xxx",
         // 其他渠道特定配置...
     }
     
@@ -194,7 +194,7 @@ async def test_channel(
         // 兼容旧用法（可选）
         "engine": "openai",
         "base_url": "https://api.openai.com/v1",
-        "api_key": "sk-xxx"
+        "api_key": "sk-xxx 或 zk-xxx"
     }
     """
     from core.request import get_payload

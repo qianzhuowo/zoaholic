@@ -13,6 +13,8 @@ from urllib.parse import urlparse, urlunparse
 from ..utils import (
     safe_get,
     get_model_dict,
+    build_claude_thinking_payload,
+    apply_claude_thinking_constraints,
     get_base64_image,
     get_tools_mode,
     generate_sse_response,
@@ -345,6 +347,7 @@ async def get_claude_payload(request, engine, provider, api_key=None):
         'user',
         'include_usage',
         'stream_options',
+        'thinking',
     ]
 
     for field, value in request.model_dump(exclude_unset=True).items():
@@ -396,30 +399,24 @@ async def get_claude_payload(request, engine, provider, api_key=None):
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
 
+    thinking_config = None
+
     if "think" in request.model.lower():
-        payload["thinking"] = {
-            "budget_tokens": 4096,
-            "type": "enabled"
-        }
-        payload["temperature"] = 1
-        payload.pop("top_p", None)
-        payload.pop("top_k", None)
+        thinking_config = build_claude_thinking_payload(budget_tokens=4096, thinking_type="enabled")
         if request.model.split("-")[-1].isdigit():
             think_tokens = int(request.model.split("-")[-1])
             if think_tokens < max_tokens:
-                payload["thinking"] = {
-                    "budget_tokens": think_tokens,
-                    "type": "enabled"
-                }
+                thinking_config = build_claude_thinking_payload(budget_tokens=think_tokens, thinking_type="enabled")
 
     if request.thinking:
-        payload["thinking"] = {
-            "budget_tokens": request.thinking.budget_tokens,
-            "type": request.thinking.type
-        }
-        payload["temperature"] = 1
-        payload.pop("top_p", None)
-        payload.pop("top_k", None)
+        thinking_config = build_claude_thinking_payload(request.thinking)
+
+    if thinking_config:
+        payload["thinking"] = thinking_config
+        if thinking_config.get("type") != "disabled":
+            apply_claude_thinking_constraints(payload)
+    else:
+        payload.pop("thinking", None)
 
     if safe_get(provider, "preferences", "post_body_parameter_overrides", default=None):
         for key, value in safe_get(provider, "preferences", "post_body_parameter_overrides", default={}).items():

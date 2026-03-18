@@ -62,6 +62,16 @@ yaml_error_message = None
 
 _API_YAML_FILE_CANDIDATES = {"api.yaml", "api.yml"}
 
+LOCAL_API_KEY_PREFIXES = ("sk-", "zk-")
+
+
+def is_local_api_key(value: Optional[str]) -> bool:
+    """判断是否为 Zoaholic 本地聚合器 API Key（兼容 sk-/zk- 前缀）。"""
+
+    if not isinstance(value, str):
+        return False
+    return value.startswith(LOCAL_API_KEY_PREFIXES)
+
 
 def _looks_like_docker_miscreated_api_yaml_dir(path: str) -> bool:
     """判断目标路径是否像 Docker 单文件挂载误创建出来的 api.yaml 目录。"""
@@ -662,8 +672,8 @@ async def load_config(app=None):
         # 通过 /admin 页面或 /v1/api_config/update 完成配置，并把配置持久化到数据库。
         #
         # 支持：
-        # - ADMIN_API_KEY=sk-xxxx
-        # - ADMIN_API_KEYS=sk-xxx,sk-yyy
+        # - ADMIN_API_KEY=sk-xxxx / zk-xxxx
+        # - ADMIN_API_KEYS=sk-xxx,zk-yyy
         admin_keys_raw = (os.getenv("ADMIN_API_KEYS") or os.getenv("ADMIN_API_KEY") or "").strip()
         if admin_keys_raw:
             admin_keys = [k.strip() for k in admin_keys_raw.split(",") if k.strip()]
@@ -1157,7 +1167,7 @@ def post_all_models(api_index, config, api_list, models_list):
                 provider = model.split("/")[0]
                 model = model.split("/")[1]
                 if model == "*":
-                    if provider.startswith("sk-") and provider in api_list:
+                    if is_local_api_key(provider) and provider in api_list:
                         # 分组过滤：仅当本地聚合器 Key 与当前请求 Key 分组有交集时才包含
                         try:
                             local_index = api_list.index(provider)
@@ -1217,7 +1227,7 @@ def post_all_models(api_index, config, api_list, models_list):
                                     }
                                     all_models.append(model_info)
                 else:
-                    if provider.startswith("sk-") and provider in api_list:
+                    if is_local_api_key(provider) and provider in api_list:
                         # 分组过滤：仅当本地聚合器 Key 与当前请求 Key 分组有交集时才包含
                         try:
                             local_index = api_list.index(provider)
@@ -1280,7 +1290,7 @@ def post_all_models(api_index, config, api_list, models_list):
                                     all_models.append(model_info)
                 continue
 
-            if model.startswith("sk-") and model in api_list:
+            if is_local_api_key(model) and model in api_list:
                 continue
 
             # 直接使用配置的模型名，不做归一化

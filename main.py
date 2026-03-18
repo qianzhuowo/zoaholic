@@ -29,7 +29,7 @@ from core.middleware import StatsMiddleware, request_info, get_api_key
 from core.error_response import openai_error_response, normalize_error_detail, create_proxy_error_response, normalize_proxy_error_policy
 from core.watchdog import EventLoopBlockWatchdog
 
-from utils import safe_get, load_config
+from utils import safe_get, load_config, is_local_api_key
 
 from db import DISABLE_DATABASE, RequestStat, AdminUser, DB_TYPE, async_session_scope
 from core.stats import (
@@ -629,7 +629,7 @@ async def ensure_config(request: Request, call_next):
             api_key_model_list = item.get("model", [])
             for provider_rule in api_key_model_list:
                 provider_name = provider_rule.split("/")[0]
-                if provider_name.startswith("sk-") and provider_name in app.state.api_list:
+                if is_local_api_key(provider_name) and provider_name in app.state.api_list:
                     models_list = []
                     try:
                         # 构建请求头

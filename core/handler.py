@@ -42,7 +42,7 @@ from core.utils import (
 )
 from core.routing import get_right_order_providers
 from core.error_response import openai_error_response
-from utils import safe_get, error_handling_wrapper
+from utils import safe_get, error_handling_wrapper, is_local_api_key
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -181,7 +181,7 @@ async def process_request(
     model_dict = provider["_model_dict_cache"]
     original_model = model_dict[request.model]
     
-    if provider['provider'].startswith("sk-"):
+    if is_local_api_key(provider['provider']):
         api_key = provider['provider']
     elif provider.get("api"):
         api_key = await provider_api_circular_list[provider['provider']].next(original_model)
@@ -531,7 +531,7 @@ async def process_request_passthrough(
     model_dict = provider["_model_dict_cache"]
     original_model = model_dict[request.model]
 
-    if provider["provider"].startswith("sk-"):
+    if is_local_api_key(provider["provider"]):
         api_key = provider["provider"]
     elif provider.get("api"):
         api_key = await provider_api_circular_list[provider["provider"]].next(original_model)
@@ -933,8 +933,8 @@ class ModelRequestHandler:
 
             original_request_model = (original_model, request_data.model)
             
-            # 处理本地 sk- 代理
-            if provider_name.startswith("sk-") and provider_name in self.app.state.api_list:
+            # 处理本地 sk-/zk- 代理
+            if is_local_api_key(provider_name) and provider_name in self.app.state.api_list:
                 local_provider_api_index = self.app.state.api_list.index(provider_name)
                 local_provider_scheduling_algorithm = safe_get(
                     config, 'api_keys', local_provider_api_index, "preferences", 
@@ -948,7 +948,7 @@ class ModelRequestHandler:
                 local_timeout_value = 0
                 for local_provider in local_provider_matching_providers:
                     local_provider_name = local_provider['provider']
-                    if not local_provider_name.startswith("sk-"):
+                    if not is_local_api_key(local_provider_name):
                         local_timeout_value += get_preference(
                             self.app.state.provider_timeouts, local_provider_name, 
                             original_request_model, self.default_timeout
@@ -969,7 +969,7 @@ class ModelRequestHandler:
             )
             if keepalive_interval > local_timeout_value:
                 keepalive_interval = None
-            if provider_name.startswith("sk-"):
+            if is_local_api_key(provider_name):
                 keepalive_interval = None
 
             try:

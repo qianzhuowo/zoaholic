@@ -595,14 +595,14 @@ export default function Admin() {
                   <div className="flex gap-2">
                     <input
                       type="text" value={formApi} onChange={e => setFormApi(e.target.value)}
-                      placeholder="sk-xxx..."
+                      placeholder="sk-xxx... / zk-xxx..."
                       className="flex-1 bg-background border border-border focus:border-primary px-3 py-2 rounded-lg text-sm font-mono text-foreground"
                     />
                     <button onClick={generateKey} className="bg-muted hover:bg-muted/80 text-foreground px-3 py-2 rounded-lg flex items-center gap-1.5 text-sm">
                       <Wand2 className="w-4 h-4" /> 生成
                     </button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">建议使用以 sk- 开头的随机字符串</p>
+                  <p className="text-xs text-muted-foreground mt-1">建议使用以 sk- 或 zk- 开头的随机字符串（默认生成仍为 sk-）</p>
                 </div>
 
                 <div>

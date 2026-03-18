@@ -18,7 +18,6 @@ from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 
 from ..utils import (
-    BaseAPI,
     safe_get,
     get_model_dict,
     get_base64_image,
@@ -77,6 +76,32 @@ async def format_input_file(file_ref) -> dict:
     }
 
 
+def _normalize_responses_base_url(base_url: str | None) -> tuple[str, str, str]:
+    """统一规范化 Responses 渠道的基础 URL。
+
+    Returns:
+        tuple[str, str, str]: (v1_base_url, responses_url, models_url)
+    """
+
+    raw_base_url = str(base_url or "https://api.openai.com/v1").strip()
+    parsed = urlparse(raw_base_url)
+    path = (parsed.path or "").rstrip("/")
+
+    if path.endswith("/responses"):
+        path = path[: -len("/responses")]
+
+    idx = path.rfind("/v1")
+    if idx != -1 and (idx + 3 == len(path) or path[idx + 3 : idx + 4] == "/"):
+        path = path[: idx + 3]
+    else:
+        path = f"{path}/v1" if path else "/v1"
+
+    v1_base_url = urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+    responses_url = urlunparse((parsed.scheme, parsed.netloc, f"{path}/responses", "", "", ""))
+    models_url = urlunparse((parsed.scheme, parsed.netloc, f"{path}/models", "", "", ""))
+    return v1_base_url, responses_url, models_url
+
+
 async def get_responses_passthrough_meta(request, engine, provider, api_key=None):
     """透传用：仅构建 url/headers，payload 由入口原生请求提供"""
     headers = {
@@ -85,19 +110,7 @@ async def get_responses_passthrough_meta(request, engine, provider, api_key=None
     if api_key:
         headers['Authorization'] = f"Bearer {api_key}"
 
-    base_url = provider.get('base_url', 'https://api.openai.com/v1/responses')
-
-    # 确保 URL 以 /responses 结尾
-    parsed = urlparse(base_url)
-    if not parsed.path.endswith('/responses'):
-        if parsed.path.endswith('/v1'):
-            url = base_url.rstrip('/') + '/responses'
-        elif '/v1/' in parsed.path:
-            url = base_url.split('/v1/')[0] + '/v1/responses'
-        else:
-            url = base_url.rstrip('/') + '/v1/responses'
-    else:
-        url = base_url
+    _, url, _ = _normalize_responses_base_url(provider.get('base_url'))
 
     return url, headers, {}
 
@@ -257,19 +270,7 @@ async def get_responses_payload(request, engine, provider, api_key=None):
         headers['Authorization'] = f"Bearer {api_key}"
 
     # 构建 URL
-    base_url = provider.get('base_url', 'https://api.openai.com/v1/responses')
-    parsed = urlparse(base_url)
-
-    # 确保 URL 以 /responses 结尾
-    if not parsed.path.endswith('/responses'):
-        if parsed.path.endswith('/v1'):
-            url = base_url.rstrip('/') + '/responses'
-        elif '/v1/' in parsed.path:
-            url = base_url.split('/v1/')[0] + '/v1/responses'
-        else:
-            url = base_url.rstrip('/') + '/v1/responses'
-    else:
-        url = base_url
+    _, url, _ = _normalize_responses_base_url(provider.get('base_url'))
 
     # 构建 input 和 instructions
     input_items = []
@@ -790,7 +791,7 @@ async def fetch_responses_stream(client, url, headers, payload, model, timeout):
 
 async def fetch_responses_models(client, provider):
     """获取 Responses API 支持的模型列表"""
-    base_url = provider.get('base_url', 'https://api.openai.com/v1').rstrip('/')
+    _, _, models_url = _normalize_responses_base_url(provider.get('base_url'))
     api_key = provider.get('api')
     if isinstance(api_key, list):
         api_key = api_key[0] if api_key else None
@@ -798,12 +799,6 @@ async def fetch_responses_models(client, provider):
     headers = {'Content-Type': 'application/json'}
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
-
-    # 获取模型列表
-    if '/v1/responses' in base_url:
-        models_url = base_url.replace('/v1/responses', '/v1/models')
-    else:
-        models_url = f"{base_url}/models"
 
     response = await client.get(models_url, headers=headers)
     response.raise_for_status()
@@ -830,7 +825,7 @@ def register():
     register_channel(
         id="openai-responses",
         type_name="openai-responses",
-        default_base_url="https://api.openai.com/v1/responses",
+        default_base_url="https://api.openai.com/v1",
         auth_header="Authorization: Bearer {api_key}",
         description="OpenAI Responses API（GPT-5/o1/o3/o4 等新模型专用）",
         request_adapter=get_responses_payload,
