@@ -580,11 +580,11 @@ async def get_stats(
 async def get_usage_analysis(
     request: Request,
     token: str = Depends(verify_admin_api_key),
-    provider: Optional[str] = Query(default=None, description="Filter by provider name"),
-    model: Optional[str] = Query(default=None, description="Filter by model name"),
+    provider: Optional[str] = Query(default=None, description="Provider filter, comma-separated for multiple"),
+    model: Optional[str] = Query(default=None, description="Model filter, comma-separated for multiple"),
     start_datetime: Optional[str] = Query(default=None, description="ISO start datetime"),
     end_datetime: Optional[str] = Query(default=None, description="ISO end datetime"),
-    hours: int = Query(default=24, ge=1, le=720, description="Number of hours to look back when no explicit datetime range is provided"),
+    hours: int = Query(default=24, ge=1, le=8760, description="Number of hours to look back when no explicit datetime range is provided"),
 ):
     """基础版用量分析：按 provider + model 聚合，并支持时间范围过滤。"""
     if DISABLE_DATABASE:
@@ -593,6 +593,9 @@ async def get_usage_analysis(
     now = datetime.now(timezone.utc)
     start_dt_obj = None
     end_dt_obj = None
+
+    provider_list = [item.strip() for item in provider.split(',') if item.strip()] if provider else []
+    model_list = [item.strip() for item in model.split(',') if item.strip()] if model else []
 
     try:
         if start_datetime:
@@ -630,12 +633,20 @@ async def get_usage_analysis(
             "AND model IS NOT NULL AND model != ''"
         )
         params: List[Any] = []
-        if provider:
-            sql += " AND provider = ?"
-            params.append(provider)
-        if model:
-            sql += " AND model = ?"
-            params.append(model)
+        if provider_list:
+            if len(provider_list) == 1:
+                sql += " AND provider = ?"
+                params.append(provider_list[0])
+            else:
+                sql += f" AND provider IN ({','.join(['?'] * len(provider_list))})"
+                params.extend(provider_list)
+        if model_list:
+            if len(model_list) == 1:
+                sql += " AND model = ?"
+                params.append(model_list[0])
+            else:
+                sql += f" AND model IN ({','.join(['?'] * len(model_list))})"
+                params.extend(model_list)
         if start_dt_obj:
             sql += " AND timestamp >= ?"
             params.append(format_d1_datetime(start_dt_obj))
@@ -672,10 +683,16 @@ async def get_usage_analysis(
                 .where(RequestStat.model.isnot(None), RequestStat.model != "")
             )
 
-            if provider:
-                query = query.where(RequestStat.provider == provider)
-            if model:
-                query = query.where(RequestStat.model == model)
+            if provider_list:
+                if len(provider_list) == 1:
+                    query = query.where(RequestStat.provider == provider_list[0])
+                else:
+                    query = query.where(RequestStat.provider.in_(provider_list))
+            if model_list:
+                if len(model_list) == 1:
+                    query = query.where(RequestStat.model == model_list[0])
+                else:
+                    query = query.where(RequestStat.model.in_(model_list))
             if start_dt_obj:
                 query = query.where(RequestStat.timestamp >= start_dt_obj)
             if end_dt_obj:
@@ -716,6 +733,112 @@ async def get_usage_analysis(
         summary=summary,
         query_details=query_details,
     )
+
+
+@router.get("/v1/stats/model_trend", dependencies=[Depends(rate_limit_dependency)])
+async def get_model_trend(
+    request: Request,
+    token: str = Depends(verify_admin_api_key),
+    start_datetime: Optional[str] = None,
+    end_datetime: Optional[str] = None,
+    hours: int = Query(default=24, ge=1, le=8760),
+    provider: Optional[str] = Query(default=None, description="Provider filter, comma-separated for multiple"),
+    model: Optional[str] = Query(default=None, description="Model filter, comma-separated for multiple"),
+):
+    """按小时聚合所选模型的请求趋势，用于仪表盘折线图展示。"""
+    if DISABLE_DATABASE:
+        return JSONResponse(content={"data": [], "models": []})
+
+    now = datetime.now(timezone.utc)
+    try:
+        start_dt = parse_datetime_input(start_datetime) if start_datetime else (now - timedelta(hours=hours or 24))
+        end_dt = parse_datetime_input(end_datetime) if end_datetime else now
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if end_dt < start_dt:
+        raise HTTPException(status_code=400, detail="end_datetime cannot be before start_datetime.")
+
+    provider_list = [item.strip() for item in provider.split(',') if item.strip()] if provider else []
+    model_list = [item.strip() for item in model.split(',') if item.strip()] if model else []
+
+    if (DB_TYPE or "sqlite").lower() == "d1":
+        from db import d1_client
+
+        if d1_client is None:
+            return JSONResponse(content={"data": [], "models": []})
+
+        time_group = "strftime('%Y-%m-%d %H:00:00', timestamp)"
+        sql = f"""
+            SELECT {time_group} AS hour, model, COUNT(*) AS count,
+            COALESCE(SUM(total_tokens), 0) AS tokens
+            FROM request_stats
+            WHERE timestamp >= ? AND timestamp <= ?
+              AND model IS NOT NULL AND model != ''
+        """
+        params: List[Any] = [format_d1_datetime(start_dt), format_d1_datetime(end_dt)]
+        if provider_list:
+            sql += f" AND provider IN ({','.join(['?'] * len(provider_list))})"
+            params.extend(provider_list)
+        if model_list:
+            sql += f" AND model IN ({','.join(['?'] * len(model_list))})"
+            params.extend(model_list)
+        sql += " GROUP BY hour, model ORDER BY hour ASC"
+        rows = await d1_client.query_all(sql, params)
+        raw_data = rows
+    else:
+        async with async_session_scope() as session:
+            if (DB_TYPE or "").lower() == "postgres":
+                time_group = func.date_trunc('hour', RequestStat.timestamp)
+                order_expr = time_group
+            elif (DB_TYPE or "").lower() == "mysql":
+                time_group = func.date_format(RequestStat.timestamp, '%Y-%m-%d %H:00:00')
+                order_expr = time_group
+            else:
+                time_group = func.strftime('%Y-%m-%d %H:00:00', RequestStat.timestamp)
+                order_expr = time_group
+
+            query = select(
+                time_group.label('hour'),
+                RequestStat.model,
+                func.count().label('count'),
+                func.sum(func.coalesce(RequestStat.total_tokens, 0)).label('tokens'),
+            ).where(
+                RequestStat.timestamp >= start_dt,
+                RequestStat.timestamp <= end_dt,
+                RequestStat.model.isnot(None),
+                RequestStat.model != '',
+            )
+
+            if provider_list:
+                query = query.where(RequestStat.provider.in_(provider_list))
+            if model_list:
+                query = query.where(RequestStat.model.in_(model_list))
+
+            query = query.group_by(time_group, RequestStat.model).order_by(order_expr)
+            result = await session.execute(query)
+            raw_data = [
+                {"hour": str(row.hour), "model": row.model, "count": int(row.count or 0), "tokens": int(row.tokens or 0)}
+                for row in result.fetchall()
+            ]
+
+    chart_dict: Dict[str, Dict[str, Any]] = {}
+    models_seen = set()
+    for item in raw_data:
+        hour = item["hour"]
+        model_name = item["model"]
+        models_seen.add(model_name)
+        if hour not in chart_dict:
+            chart_dict[hour] = {"hour": hour}
+        chart_dict[hour][model_name] = int(item.get("count") or 0)
+
+    chart_data = sorted(chart_dict.values(), key=lambda item: item["hour"])
+    return JSONResponse(content={
+        "data": chart_data,
+        "models": sorted(models_seen),
+        "start_datetime": start_dt.isoformat(),
+        "end_datetime": end_dt.isoformat(),
+    })
 
 
 @router.get("/v1/token_usage", response_model=TokenUsageResponse, dependencies=[Depends(rate_limit_dependency)])

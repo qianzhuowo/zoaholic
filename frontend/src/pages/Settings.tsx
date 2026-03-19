@@ -3,7 +3,7 @@ import { useAuthStore } from '../store/authStore';
 import { apiFetch } from '../lib/api';
 import {
   Settings2, Save, RefreshCw, AlertCircle, Clock, Zap, Shield,
-  Timer, Database, Server, Blocks, Plus, Trash2, Edit2, Link
+  Timer, Database, Server, Blocks, Plus, Trash2, Edit2, Link, DollarSign
 } from 'lucide-react';
 import { RateLimitEditor } from '../components/RateLimitEditor';
 
@@ -22,6 +22,14 @@ interface LogsCleanupResponse {
   message: string;
 }
 
+interface ModelPriceRow {
+  id: string;
+  provider: string;
+  model: string;
+  prompt: number;
+  completion: number;
+}
+
 const LOG_CLEANUP_FIELD_OPTIONS: { key: string; label: string }[] = [
   { key: 'request_headers', label: '用户请求头' },
   { key: 'request_body', label: '用户请求体' },
@@ -37,9 +45,57 @@ const DEFAULT_CLEANUP_FIELDS = LOG_CLEANUP_FIELD_OPTIONS
   .filter(item => item.key !== 'text')
   .map(item => item.key);
 
+const GLOBAL_PROMPT_PRICE_KEY = 'usage_analysis_default_prompt_price';
+const GLOBAL_COMPLETION_PRICE_KEY = 'usage_analysis_default_completion_price';
+const GLOBAL_MODEL_PRICES_KEY = 'usage_analysis_model_prices';
+
+const asFiniteNumber = (value: unknown, fallback: number) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const buildModelPriceKey = (provider: string, model: string) => `${provider}:${model}`;
+
+const parseModelPriceRows = (value: unknown): ModelPriceRow[] => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, rawValue]) => {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) return [];
+    const [provider = '', ...modelParts] = key.split(':');
+    const model = modelParts.join(':');
+    if (!provider || !model) return [];
+
+    const candidate = rawValue as Record<string, unknown>;
+    return [{
+      id: key,
+      provider,
+      model,
+      prompt: asFiniteNumber(candidate.prompt, 0.3),
+      completion: asFiniteNumber(candidate.completion, 1.0),
+    }];
+  });
+};
+
+const serializeModelPriceRows = (rows: ModelPriceRow[]) => {
+  const result: Record<string, { prompt: number; completion: number }> = {};
+  rows.forEach(row => {
+    const provider = row.provider.trim();
+    const model = row.model.trim();
+    if (!provider || !model) return;
+    result[buildModelPriceKey(provider, model)] = {
+      prompt: asFiniteNumber(row.prompt, 0),
+      completion: asFiniteNumber(row.completion, 0),
+    };
+  });
+  return result;
+};
+
 export default function Settings() {
   const { token } = useAuthStore();
   const [preferences, setPreferences] = useState<any>({});
+  const [modelPriceRows, setModelPriceRows] = useState<ModelPriceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -74,12 +130,19 @@ export default function Settings() {
           const data = await res.json();
           const loadedPreferences = data.api_config?.preferences || data.preferences || {};
 
-          // Ensure default external clients exist if not defined
           if (!loadedPreferences.external_clients) {
             loadedPreferences.external_clients = [
               { name: 'IdoFront', icon: '🌚', link: 'https://idofront.pages.dev/?baseurl={address}/v1&key={key}' }
             ];
           }
+          if (loadedPreferences[GLOBAL_PROMPT_PRICE_KEY] == null) {
+            loadedPreferences[GLOBAL_PROMPT_PRICE_KEY] = 0.3;
+          }
+          if (loadedPreferences[GLOBAL_COMPLETION_PRICE_KEY] == null) {
+            loadedPreferences[GLOBAL_COMPLETION_PRICE_KEY] = 1.0;
+          }
+
+          setModelPriceRows(parseModelPriceRows(loadedPreferences[GLOBAL_MODEL_PRICES_KEY]));
           setPreferences(loadedPreferences);
         }
       } catch (err) {
@@ -93,6 +156,35 @@ export default function Settings() {
 
   const updatePreference = (key: string, value: any) => {
     setPreferences((prev: any) => ({ ...prev, [key]: value }));
+  };
+
+  const updateModelPriceRow = (id: string, field: keyof Omit<ModelPriceRow, 'id'>, value: string | number) => {
+    setModelPriceRows(prev => prev.map(row => {
+      if (row.id !== id) return row;
+      if (field === 'prompt' || field === 'completion') {
+        return { ...row, [field]: typeof value === 'number' ? value : parseFloat(String(value)) || 0 };
+      }
+      const nextValue = String(value);
+      const provider = field === 'provider' ? nextValue : row.provider;
+      const model = field === 'model' ? nextValue : row.model;
+      return {
+        ...row,
+        [field]: nextValue,
+        id: buildModelPriceKey(provider, model),
+      };
+    }));
+  };
+
+  const addModelPriceRow = () => {
+    const seed = `new-provider:${Date.now()}`;
+    setModelPriceRows(prev => ([
+      ...prev,
+      { id: seed, provider: '', model: '', prompt: 0.3, completion: 1.0 },
+    ]));
+  };
+
+  const removeModelPriceRow = (id: string) => {
+    setModelPriceRows(prev => prev.filter(row => row.id !== id));
   };
 
   const parseErrorMessage = async (res: Response) => {
@@ -121,6 +213,7 @@ export default function Settings() {
     const payload: Record<string, unknown> = {
       dry_run: dryRun,
       action: cleanupAction,
+      success_mode: cleanupSuccessMode,
       flagged_only: cleanupFlaggedOnly,
     };
 
@@ -131,44 +224,25 @@ export default function Settings() {
     if (cleanupTimeMode === 'older_than_hours') {
       payload.older_than_hours = cleanupOlderThanHours;
     } else if (cleanupTimeMode === 'custom_range') {
-      const startIso = toIsoStringOrUndefined(cleanupStartTime);
-      const endIso = toIsoStringOrUndefined(cleanupEndTime);
-      if (startIso) payload.start_time = startIso;
-      if (endIso) payload.end_time = endIso;
+      payload.start_time = toIsoStringOrUndefined(cleanupStartTime);
+      payload.end_time = toIsoStringOrUndefined(cleanupEndTime);
     }
 
     if (cleanupProvider.trim()) payload.provider = cleanupProvider.trim();
     if (cleanupModel.trim()) payload.model = cleanupModel.trim();
     if (cleanupApiKey.trim()) payload.api_key = cleanupApiKey.trim();
     if (cleanupStatusCodes.trim()) {
-      const parsedCodes = cleanupStatusCodes
+      payload.status_codes = cleanupStatusCodes
         .split(',')
         .map(item => parseInt(item.trim(), 10))
-        .filter(code => !Number.isNaN(code));
-      if (parsedCodes.length > 0) {
-        payload.status_codes = parsedCodes;
-      }
+        .filter(item => Number.isFinite(item));
     }
-
-    if (cleanupSuccessMode === 'SUCCESS') payload.success = true;
-    if (cleanupSuccessMode === 'FAILED') payload.success = false;
 
     return payload;
   };
 
   const handleCleanupPreview = async () => {
     if (!token) return;
-
-    if (cleanupAction === 'clear_fields' && cleanupFields.length === 0) {
-      alert('请至少选择一个要清空的字段');
-      return;
-    }
-
-    if (cleanupTimeMode === 'older_than_hours' && cleanupOlderThanHours < 1) {
-      alert('按小时清理时，小时数必须大于等于 1');
-      return;
-    }
-
     setCleanupRunning(true);
     setCleanupMessage('');
     try {
@@ -184,19 +258,18 @@ export default function Settings() {
         return;
       }
 
-      const data = await res.json();
+      const data: LogsCleanupResponse = await res.json();
       setCleanupResult(data);
-      setCleanupMessage('预览成功：仅统计未执行写入。');
-    } catch (err) {
+      setCleanupMessage(`预览完成：匹配 ${data.matched_rows} 条记录`);
+    } catch {
       setCleanupMessage('预览失败：网络错误');
     } finally {
       setCleanupRunning(false);
     }
   };
 
-  const requiredConfirmPhrase = cleanupAction === 'delete_rows' ? 'DELETE' : 'CLEAR';
-
   const handleCleanupExecute = async () => {
+    const requiredConfirmPhrase = cleanupAction === 'delete_rows' ? 'DELETE' : 'CLEAR';
     if (!token) return;
 
     if (cleanupAction === 'clear_fields' && cleanupFields.length === 0) {
@@ -241,14 +314,42 @@ export default function Settings() {
 
   const handleSave = async () => {
     if (!token) return;
+
+    const duplicateKeys = new Set<string>();
+    const seenKeys = new Set<string>();
+    for (const row of modelPriceRows) {
+      const provider = row.provider.trim();
+      const model = row.model.trim();
+      if (!provider && !model) continue;
+      if (!provider || !model) {
+        alert('模型价格表中的 provider 和 model 必须同时填写');
+        return;
+      }
+      const key = buildModelPriceKey(provider, model);
+      if (seenKeys.has(key)) {
+        duplicateKeys.add(key);
+      }
+      seenKeys.add(key);
+    }
+
+    if (duplicateKeys.size > 0) {
+      alert(`模型价格表存在重复项：${Array.from(duplicateKeys).join('、')}`);
+      return;
+    }
+
     setSaving(true);
     try {
+      const nextPreferences = {
+        ...preferences,
+        [GLOBAL_MODEL_PRICES_KEY]: serializeModelPriceRows(modelPriceRows),
+      };
       const res = await apiFetch('/v1/api_config/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ preferences })
+        body: JSON.stringify({ preferences: nextPreferences })
       });
       if (res.ok) {
+        setPreferences(nextPreferences);
         alert('配置已保存成功');
       } else {
         const msg = await parseErrorMessage(res);
@@ -272,7 +373,6 @@ export default function Settings() {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 font-sans max-w-4xl mx-auto pb-12">
-      {/* Header */}
       <div className="flex justify-between items-center border-b border-border pb-6">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">系统设置</h1>
@@ -289,7 +389,6 @@ export default function Settings() {
       </div>
 
       <div className="space-y-8">
-        {/* 高可用性设置 */}
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Zap className="w-5 h-5 text-amber-500" /> 高可用性与调度
@@ -336,7 +435,136 @@ export default function Settings() {
           </div>
         </section>
 
-        {/* 速率限制 */}
+        <section className="bg-card border border-border rounded-xl overflow-hidden">
+          <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
+            <DollarSign className="w-5 h-5 text-amber-500" /> 仪表盘费用模拟默认价格
+          </div>
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">默认输入价格 ($/M)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={preferences[GLOBAL_PROMPT_PRICE_KEY] ?? 0.3}
+                  onChange={e => updatePreference(GLOBAL_PROMPT_PRICE_KEY, parseFloat(e.target.value) || 0)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+                <p className="text-xs text-muted-foreground mt-1">当不存在专属模型价格时，回退使用该默认输入 Token 单价。</p>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">默认输出价格 ($/M)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={preferences[GLOBAL_COMPLETION_PRICE_KEY] ?? 1.0}
+                  onChange={e => updatePreference(GLOBAL_COMPLETION_PRICE_KEY, parseFloat(e.target.value) || 0)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+                <p className="text-xs text-muted-foreground mt-1">当不存在专属模型价格时，回退使用该默认输出 Token 单价。</p>
+              </div>
+            </div>
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-muted-foreground">
+              该配置为系统全局配置。保存后，所有管理员在仪表盘中看到的默认价格都会同步更新。
+            </div>
+          </div>
+        </section>
+
+        <section className="bg-card border border-border rounded-xl overflow-hidden">
+          <div className="p-4 border-b border-border bg-muted/30 flex items-center justify-between gap-2 font-medium text-foreground">
+            <div className="flex items-center gap-2">
+              <DollarSign className="w-5 h-5 text-emerald-500" /> provider + model 专属价格表
+            </div>
+            <button
+              type="button"
+              onClick={addModelPriceRow}
+              className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-3 py-1.5 text-xs hover:bg-muted"
+            >
+              <Plus className="w-3.5 h-3.5" /> 新增一行
+            </button>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs text-muted-foreground">
+              专属价格优先级高于全局默认价格。键规则为 <code className="px-1 rounded bg-muted">provider:model</code>。
+            </div>
+
+            <div className="overflow-x-auto border border-border rounded-lg">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-muted text-muted-foreground font-medium">
+                  <tr>
+                    <th className="px-4 py-3">渠道 provider</th>
+                    <th className="px-4 py-3">模型 model</th>
+                    <th className="px-4 py-3 text-center">输入价格 ($/M)</th>
+                    <th className="px-4 py-3 text-center">输出价格 ($/M)</th>
+                    <th className="px-4 py-3 text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {modelPriceRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">暂无专属价格，新增后保存即可生效</td>
+                    </tr>
+                  ) : (
+                    modelPriceRows.map(row => (
+                      <tr key={row.id} className="hover:bg-muted/50 transition-colors">
+                        <td className="px-4 py-3">
+                          <input
+                            type="text"
+                            value={row.provider}
+                            onChange={e => updateModelPriceRow(row.id, 'provider', e.target.value)}
+                            placeholder="例如 openai"
+                            className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <input
+                            type="text"
+                            value={row.model}
+                            onChange={e => updateModelPriceRow(row.id, 'model', e.target.value)}
+                            placeholder="例如 gpt-4o"
+                            className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.prompt}
+                            onChange={e => updateModelPriceRow(row.id, 'prompt', e.target.value)}
+                            className="w-28 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground text-center"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.completion}
+                            onChange={e => updateModelPriceRow(row.id, 'completion', e.target.value)}
+                            className="w-28 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground text-center"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => removeModelPriceRow(row.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-500/20"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> 删除
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Shield className="w-5 h-5 text-emerald-500" /> 安全与速率限制
@@ -354,7 +582,6 @@ export default function Settings() {
           </div>
         </section>
 
-        {/* 超时与心跳 */}
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Timer className="w-5 h-5 text-blue-500" /> 超时与心跳配置
@@ -395,7 +622,6 @@ export default function Settings() {
           </div>
         </section>
 
-        {/* 数据管理 */}
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Database className="w-5 h-5 text-purple-500" /> 数据保留策略
@@ -467,44 +693,33 @@ export default function Settings() {
           </div>
         </section>
 
-        {/* 数据库清理工具 */}
         <section className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border bg-muted/30 flex items-center gap-2 font-medium text-foreground">
             <Database className="w-5 h-5 text-rose-500" /> 数据库清理工具
           </div>
-          <div className="p-6 space-y-5">
-            <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-lg text-sm text-rose-700 dark:text-rose-300">
-              <div className="font-medium mb-1">高风险操作提醒</div>
-              <ul className="list-disc pl-4 space-y-1 text-xs">
-                <li><code className="px-1 rounded bg-rose-500/20">clear_fields</code>：清空大字段，保留日志行（推荐）</li>
-                <li><code className="px-1 rounded bg-rose-500/20">delete_rows</code>：直接删除日志行（不可恢复）</li>
-                <li>建议先点击“预览匹配结果（Dry Run）”，确认范围后再执行</li>
-              </ul>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">清理动作</label>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">操作类型</label>
                 <select
                   value={cleanupAction}
                   onChange={e => setCleanupAction(e.target.value as CleanupAction)}
                   className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
                 >
-                  <option value="clear_fields">仅清空字段内容（保留日志）</option>
-                  <option value="delete_rows">删除整条日志</option>
+                  <option value="clear_fields">清空字段内容</option>
+                  <option value="delete_rows">删除整行日志</option>
                 </select>
               </div>
-
               <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">时间筛选模式</label>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">时间范围</label>
                 <select
                   value={cleanupTimeMode}
                   onChange={e => setCleanupTimeMode(e.target.value as CleanupTimeMode)}
                   className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
                 >
-                  <option value="older_than_hours">清理早于 N 小时的数据</option>
-                  <option value="custom_range">按时间区间清理</option>
-                  <option value="all">不按时间筛选（全量）</option>
+                  <option value="older_than_hours">早于指定小时</option>
+                  <option value="custom_range">自定义时间范围</option>
+                  <option value="all">全部时间</option>
                 </select>
               </div>
             </div>
@@ -514,16 +729,16 @@ export default function Settings() {
                 <label className="text-sm font-medium text-foreground mb-1.5 block">早于多少小时</label>
                 <input
                   type="number"
-                  min={1}
+                  min="1"
                   value={cleanupOlderThanHours}
-                  onChange={e => setCleanupOlderThanHours(parseInt(e.target.value || '0', 10))}
-                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                  onChange={e => setCleanupOlderThanHours(parseInt(e.target.value, 10) || 168)}
+                  className="w-full md:w-60 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
                 />
               </div>
             )}
 
             {cleanupTimeMode === 'custom_range' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="text-sm font-medium text-foreground mb-1.5 block">开始时间</label>
                   <input
@@ -545,155 +760,130 @@ export default function Settings() {
               </div>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input type="text" value={cleanupProvider} onChange={e => setCleanupProvider(e.target.value)} placeholder="按渠道过滤（provider/provider_id 模糊匹配）" className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground" />
-              <input type="text" value={cleanupModel} onChange={e => setCleanupModel(e.target.value)} placeholder="按模型过滤（模糊匹配）" className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground" />
-              <input type="text" value={cleanupApiKey} onChange={e => setCleanupApiKey(e.target.value)} placeholder="按 API Key 名称/分组/前缀过滤" className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground" />
-              <input type="text" value={cleanupStatusCodes} onChange={e => setCleanupStatusCodes(e.target.value)} placeholder="按状态码过滤（如 400,401,429）" className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground" />
-              <select value={cleanupSuccessMode} onChange={e => setCleanupSuccessMode(e.target.value as CleanupSuccessMode)} className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground md:col-span-2">
-                <option value="ALL">所有状态</option>
-                <option value="SUCCESS">仅成功请求</option>
-                <option value="FAILED">仅失败请求</option>
-              </select>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">渠道 provider（可选）</label>
+                <input
+                  type="text"
+                  value={cleanupProvider}
+                  onChange={e => setCleanupProvider(e.target.value)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">模型 model（可选）</label>
+                <input
+                  type="text"
+                  value={cleanupModel}
+                  onChange={e => setCleanupModel(e.target.value)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">API Key 前缀（可选）</label>
+                <input
+                  type="text"
+                  value={cleanupApiKey}
+                  onChange={e => setCleanupApiKey(e.target.value)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">状态码（可选，逗号分隔）</label>
+                <input
+                  type="text"
+                  value={cleanupStatusCodes}
+                  onChange={e => setCleanupStatusCodes(e.target.value)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                />
+              </div>
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-foreground">
-              <input
-                type="checkbox"
-                checked={cleanupFlaggedOnly}
-                onChange={e => setCleanupFlaggedOnly(e.target.checked)}
-                className="rounded border-border"
-              />
-              仅清理已标记日志（is_flagged=true）
-            </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="text-sm font-medium text-foreground mb-1.5 block">成功状态筛选</label>
+                <select
+                  value={cleanupSuccessMode}
+                  onChange={e => setCleanupSuccessMode(e.target.value as CleanupSuccessMode)}
+                  className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                >
+                  <option value="ALL">全部</option>
+                  <option value="SUCCESS">仅成功</option>
+                  <option value="FAILED">仅失败</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-3 pt-7">
+                <input
+                  id="cleanup-flagged-only"
+                  type="checkbox"
+                  checked={cleanupFlaggedOnly}
+                  onChange={e => setCleanupFlaggedOnly(e.target.checked)}
+                  className="h-4 w-4"
+                />
+                <label htmlFor="cleanup-flagged-only" className="text-sm text-foreground">仅处理已标记日志</label>
+              </div>
+            </div>
 
             {cleanupAction === 'clear_fields' && (
               <div>
-                <label className="text-sm font-medium text-foreground mb-2 block">选择要清空的字段</label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {LOG_CLEANUP_FIELD_OPTIONS.map(item => (
-                    <label key={item.key} className="flex items-center gap-2 text-sm text-foreground bg-muted/40 border border-border rounded-lg px-3 py-2">
+                <label className="text-sm font-medium text-foreground mb-3 block">要清空的字段</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {LOG_CLEANUP_FIELD_OPTIONS.map(option => (
+                    <label key={option.key} className="flex items-center gap-3 rounded-lg border border-border px-3 py-2 text-sm text-foreground bg-background">
                       <input
                         type="checkbox"
-                        checked={cleanupFields.includes(item.key)}
-                        onChange={() => toggleCleanupField(item.key)}
-                        className="rounded border-border"
+                        checked={cleanupFields.includes(option.key)}
+                        onChange={() => toggleCleanupField(option.key)}
+                        className="h-4 w-4"
                       />
-                      {item.label}
+                      <span>{option.label}</span>
                     </label>
                   ))}
                 </div>
               </div>
             )}
 
-            <div className="flex flex-col md:flex-row gap-3 md:items-center">
-              <button onClick={handleCleanupPreview} disabled={cleanupRunning} className="bg-secondary hover:bg-secondary/80 text-secondary-foreground px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
-                {cleanupRunning ? '处理中...' : '预览匹配结果（Dry Run）'}
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-muted-foreground">
+              先执行“预览”确认命中范围，再执行正式操作。删除行操作不可恢复，请务必谨慎。
+            </div>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={handleCleanupPreview}
+                disabled={cleanupRunning}
+                className="px-4 py-2 rounded-lg border border-border bg-background hover:bg-muted text-sm font-medium text-foreground disabled:opacity-50"
+              >
+                {cleanupRunning ? '处理中...' : '预览'}
+              </button>
+              <button
+                onClick={handleCleanupExecute}
+                disabled={cleanupRunning}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-sm font-medium disabled:opacity-50"
+              >
+                {cleanupRunning ? '处理中...' : '执行'}
               </button>
               <input
                 type="text"
                 value={cleanupConfirmText}
                 onChange={e => setCleanupConfirmText(e.target.value)}
-                placeholder={`执行前请输入确认词：${requiredConfirmPhrase}`}
-                className="flex-1 bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground"
+                placeholder={cleanupAction === 'delete_rows' ? '输入 DELETE 确认' : '输入 CLEAR 确认'}
+                className="px-3 py-2 rounded-lg border border-border bg-background text-sm text-foreground"
               />
-              <button onClick={handleCleanupExecute} disabled={cleanupRunning} className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
-                执行清理
-              </button>
             </div>
 
-            {cleanupMessage && <div className="text-sm text-muted-foreground">{cleanupMessage}</div>}
+            {cleanupMessage && (
+              <div className="text-sm text-muted-foreground">{cleanupMessage}</div>
+            )}
 
             {cleanupResult && (
-              <div className="border border-border rounded-lg p-4 bg-muted/40 space-y-2 text-sm">
-                <div>匹配记录数：<span className="font-mono">{cleanupResult.matched_rows}</span></div>
-                <div>实际影响数：<span className="font-mono">{cleanupResult.affected_rows}</span></div>
-                {Object.keys(cleanupResult.non_null_counts || {}).length > 0 && (
-                  <div>
-                    <div className="text-muted-foreground mb-1">字段非空统计：</div>
-                    <pre className="bg-background border border-border rounded-lg p-2 text-xs overflow-x-auto">{JSON.stringify(cleanupResult.non_null_counts, null, 2)}</pre>
-                  </div>
-                )}
+              <div className="rounded-lg border border-border bg-background p-4 text-sm text-foreground space-y-2">
+                <div>匹配行数：{cleanupResult.matched_rows}</div>
+                <div>影响行数：{cleanupResult.affected_rows}</div>
+                <div>操作说明：{cleanupResult.message}</div>
               </div>
             )}
           </div>
         </section>
-
-        {/* 第三方客户端配置 */}
-        <section className="bg-card border border-border rounded-xl overflow-hidden">
-          <div className="p-4 border-b border-border bg-muted/30 flex items-center justify-between">
-            <div className="flex items-center gap-2 font-medium text-foreground">
-              <Blocks className="w-5 h-5 text-pink-500" /> 第三方客户端 (Playground)
-            </div>
-            <button
-              onClick={() => {
-                const newClients = [...(preferences.external_clients || []), { name: '', icon: '🌟', link: '' }];
-                updatePreference('external_clients', newClients);
-              }}
-              className="text-xs flex items-center gap-1 bg-primary hover:bg-primary/90 text-primary-foreground px-2.5 py-1.5 rounded-md transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" /> 添加客户端
-            </button>
-          </div>
-          <div className="p-6 space-y-4">
-            <p className="text-xs text-muted-foreground mb-4">这些客户端将显示在 Playground 的侧边栏中。链接中可使用 <code className="bg-muted px-1 py-0.5 rounded text-foreground">{"{key}"}</code> 和 <code className="bg-muted px-1 py-0.5 rounded text-foreground">{"{address}"}</code> 作为变量，系统会自动注入当前 API Key 和网关地址。</p>
-
-            <div className="space-y-3">
-              {(preferences.external_clients || []).map((client: any, idx: number) => (
-                <div key={idx} className="flex gap-3 items-start bg-muted/50 p-4 rounded-lg border border-border">
-                  <input
-                    type="text"
-                    value={client.icon}
-                    onChange={e => {
-                      const newClients = [...preferences.external_clients];
-                      newClients[idx].icon = e.target.value;
-                      updatePreference('external_clients', newClients);
-                    }}
-                    placeholder="图标"
-                    className="w-12 bg-background border border-border px-2 py-2 rounded-lg text-center text-lg focus:border-primary"
-                  />
-                  <div className="flex-1 space-y-3">
-                    <input
-                      type="text"
-                      value={client.name}
-                      onChange={e => {
-                        const newClients = [...preferences.external_clients];
-                        newClients[idx].name = e.target.value;
-                        updatePreference('external_clients', newClients);
-                      }}
-                      placeholder="客户端名称 (例如: NextChat)"
-                      className="w-full bg-background border border-border px-3 py-2 rounded-lg text-sm text-foreground focus:border-primary"
-                    />
-                    <div className="relative">
-                      <Link className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground/60" />
-                      <input
-                        type="url"
-                        value={client.link}
-                        onChange={e => {
-                          const newClients = [...preferences.external_clients];
-                          newClients[idx].link = e.target.value;
-                          updatePreference('external_clients', newClients);
-                        }}
-                        placeholder='https://.../?settings={"key":"{key}","url":"{address}"}'
-                        className="w-full bg-background border border-border pl-9 pr-3 py-2 rounded-lg text-sm font-mono text-foreground focus:border-primary"
-                      />
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      const newClients = preferences.external_clients.filter((_: any, i: number) => i !== idx);
-                      updatePreference('external_clients', newClients);
-                    }}
-                    className="p-2 text-muted-foreground/60 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors self-center"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
       </div>
     </div>
   );
