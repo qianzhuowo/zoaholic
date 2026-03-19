@@ -55,6 +55,14 @@ const GLOBAL_COMPLETION_PRICE_KEY = 'usage_analysis_default_completion_price';
 const GLOBAL_MODEL_PRICES_KEY = 'usage_analysis_model_prices';
 const FALLBACK_DEFAULT_PRICES: RowPrice = { prompt: 0.3, completion: 1.0 };
 
+const formatDatetimeLocal = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+const computeTimeRangeWindow = (hours: number): { start: string; end: string } => {
+  const now = new Date();
+  return { start: formatDatetimeLocal(new Date(now.getTime() - hours * 3600_000)), end: formatDatetimeLocal(now) };
+};
+
 const asFiniteNumber = (value: unknown, fallback: number) => {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -121,8 +129,8 @@ export default function Dashboard() {
   const [analysisData, setAnalysisData] = useState<AnalysisEntry[]>([]);
   const [analysisProviders, setAnalysisProviders] = useState<string[]>([]);
   const [analysisModels, setAnalysisModels] = useState<string[]>([]);
-  const [analysisStart, setAnalysisStart] = useState('');
-  const [analysisEnd, setAnalysisEnd] = useState('');
+  const [analysisStart, setAnalysisStart] = useState(() => computeTimeRangeWindow(24).start);
+  const [analysisEnd, setAnalysisEnd] = useState(() => computeTimeRangeWindow(24).end);
   const [defaultPromptPrice, setDefaultPromptPrice] = useState(FALLBACK_DEFAULT_PRICES.prompt);
   const [defaultCompletionPrice, setDefaultCompletionPrice] = useState(FALLBACK_DEFAULT_PRICES.completion);
   const [storedModelPrices, setStoredModelPrices] = useState<StoredModelPriceMap>({});
@@ -132,6 +140,8 @@ export default function Dashboard() {
   const [trendData, setTrendData] = useState<TrendPoint[]>([]);
   const [trendModels, setTrendModels] = useState<string[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
+  const [originalRowPrices, setOriginalRowPrices] = useState<Record<number, RowPrice>>({});
+  const [savingAll, setSavingAll] = useState(false);
 
   const tooltipStyle = {
     backgroundColor: 'hsl(var(--popover))',
@@ -276,11 +286,13 @@ export default function Dashboard() {
             }
           });
           setRowPrices(newPrices);
+          setOriginalRowPrices(structuredClone(newPrices));
           return data;
         });
       } else {
         setAnalysisData([]);
         setRowPrices({});
+        setOriginalRowPrices({});
       }
 
       setTrendLoading(true);
@@ -366,6 +378,13 @@ export default function Dashboard() {
     fetchData();
   }, [token, timeRange]);
 
+  // 当 timeRange 变化时，自动更新 analysisStart / analysisEnd
+  useEffect(() => {
+    const { start, end } = computeTimeRangeWindow(timeRange);
+    setAnalysisStart(start);
+    setAnalysisEnd(end);
+  }, [timeRange]);
+
   useEffect(() => {
     fetchGlobalPriceConfig();
   }, [token]);
@@ -399,6 +418,63 @@ export default function Dashboard() {
   const channelStats = stats?.channel_success_rates || [];
   const modelStats = stats?.model_request_counts || [];
   const endpointStats = stats?.endpoint_request_counts || [];
+
+  // 计算有哪些行价格被修改了（与原始快照对比）
+  const unsavedIndices = useMemo(() => {
+    const indices: number[] = [];
+    for (const [idxStr, price] of Object.entries(rowPrices)) {
+      const idx = Number(idxStr);
+      const orig = originalRowPrices[idx];
+      if (!orig) continue;
+      if (price.prompt !== orig.prompt || price.completion !== orig.completion) {
+        indices.push(idx);
+      }
+    }
+    return indices;
+  }, [rowPrices, originalRowPrices]);
+
+  const hasUnsavedChanges = unsavedIndices.length > 0;
+
+  const saveAllModelPrices = async () => {
+    if (!token || unsavedIndices.length === 0) return;
+    setSavingAll(true);
+    try {
+      const nextStoredModelPrices: StoredModelPriceMap = { ...storedModelPrices };
+      for (const idx of unsavedIndices) {
+        const entry = analysisData[idx];
+        const price = rowPrices[idx];
+        if (!entry || !price) continue;
+        const modelKey = getProviderModelKey(entry.provider, entry.model);
+        nextStoredModelPrices[modelKey] = { prompt: price.prompt, completion: price.completion };
+      }
+
+      const res = await apiFetch('/v1/api_config/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          preferences: { [GLOBAL_MODEL_PRICES_KEY]: nextStoredModelPrices },
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        alert(`批量保存模型价格失败：${text || `HTTP ${res.status}`}`);
+        return;
+      }
+
+      setStoredModelPrices(nextStoredModelPrices);
+      setOriginalRowPrices(structuredClone(rowPrices));
+    } catch (err) {
+      console.error('Failed to save all model prices:', err);
+      alert('批量保存模型价格失败：网络错误');
+    } finally {
+      setSavingAll(false);
+    }
+  };
+
+  const resetAllModelPrices = () => {
+    setRowPrices(structuredClone(originalRowPrices));
+  };
 
   const totalRequests = channelStats.reduce((sum, item) => sum + item.total_requests, 0) || 0;
   const avgSuccessRate = totalRequests > 0
@@ -502,6 +578,10 @@ export default function Dashboard() {
         savingModelPriceKey={savingModelPriceKey}
         getModelPriceKey={(entry) => getProviderModelKey(entry.provider, entry.model)}
         onSaveModelPrice={saveModelPrice}
+        onSaveAllModelPrices={saveAllModelPrices}
+        onResetAllModelPrices={resetAllModelPrices}
+        hasUnsavedChanges={hasUnsavedChanges}
+        unsavedCount={unsavedIndices.length}
       />
     </div>
   );

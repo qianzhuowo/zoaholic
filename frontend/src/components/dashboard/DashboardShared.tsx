@@ -8,6 +8,8 @@ import {
   Cpu,
   DollarSign,
   RefreshCw,
+  RotateCcw,
+  Save,
   Search,
   Server,
   X,
@@ -462,6 +464,10 @@ export function UsageAnalysisPanel({
   savingModelPriceKey,
   getModelPriceKey,
   onSaveModelPrice,
+  onSaveAllModelPrices,
+  onResetAllModelPrices,
+  hasUnsavedChanges,
+  unsavedCount,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -502,6 +508,10 @@ export function UsageAnalysisPanel({
   savingModelPriceKey?: string | null;
   getModelPriceKey?: (entry: AnalysisEntry) => string;
   onSaveModelPrice?: (entry: AnalysisEntry, index: number) => void;
+  onSaveAllModelPrices?: () => Promise<void> | void;
+  onResetAllModelPrices?: () => void;
+  hasUnsavedChanges?: boolean;
+  unsavedCount?: number;
 }) {
   return (
     <div className="bg-card border border-border rounded-xl shadow-sm overflow-hidden">
@@ -538,9 +548,14 @@ export function UsageAnalysisPanel({
               />
             </div>
             <div className="flex items-end">
-              <p className="text-xs text-muted-foreground pb-2.5">
-                不填写时间则使用上方选择的时间范围（{timeRangeLabel}）
-              </p>
+              <button
+                onClick={onQuery}
+                disabled={analysisLoading}
+                className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {analysisLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                查询
+              </button>
             </div>
           </div>
 
@@ -559,41 +574,6 @@ export function UsageAnalysisPanel({
               onChange={setAnalysisModels}
               placeholder="全部模型"
             />
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">默认输入价格 ($/M)</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={defaultPromptPrice}
-                onChange={e => setDefaultPromptPrice(parseFloat(e.target.value) || 0)}
-                className="w-full px-3 py-2 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">默认输出价格 ($/M)</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={defaultCompletionPrice}
-                onChange={e => setDefaultCompletionPrice(parseFloat(e.target.value) || 0)}
-                className="w-full px-3 py-2 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
-              />
-            </div>
-            <div className="flex items-end gap-2">
-              <button
-                onClick={onQuery}
-                disabled={analysisLoading}
-                className="flex-1 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                {analysisLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                查询
-              </button>
-            </div>
           </div>
 
           {defaultPriceDescription && (
@@ -687,14 +667,58 @@ export function UsageAnalysisPanel({
               )}
 
               {analysisData.length > 0 && (
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-muted-foreground whitespace-nowrap">默认输入价格 ($/M)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={defaultPromptPrice}
+                      onChange={e => setDefaultPromptPrice(parseFloat(e.target.value) || 0)}
+                      className="w-24 px-2 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-xs font-medium text-muted-foreground whitespace-nowrap">默认输出价格 ($/M)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={defaultCompletionPrice}
+                      onChange={e => setDefaultCompletionPrice(parseFloat(e.target.value) || 0)}
+                      className="w-24 px-2 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
+                    />
+                  </div>
+
+                  <div className="h-5 w-px bg-border mx-1" />
+
+                  {onSaveAllModelPrices && (
+                    <button
+                      onClick={onSaveAllModelPrices}
+                      disabled={!hasUnsavedChanges}
+                      className="px-3 py-1.5 text-xs font-medium bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      保存更改{(unsavedCount ?? 0) > 0 ? ` (${unsavedCount})` : ''}
+                    </button>
+                  )}
+                  {onResetAllModelPrices && (
+                    <button
+                      onClick={onResetAllModelPrices}
+                      disabled={!hasUnsavedChanges}
+                      className="px-3 py-1.5 text-xs font-medium bg-muted hover:bg-muted/80 text-foreground border border-border rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      重置
+                    </button>
+                  )}
                   <button
                     onClick={onApplyDefaultPricesToAll}
                     className="px-3 py-1.5 text-xs font-medium bg-muted hover:bg-muted/80 text-foreground border border-border rounded-lg transition-colors"
                   >
                     将默认价格应用到所有行
                   </button>
-                  <span className="text-xs text-muted-foreground">可在表格中逐行调整每个模型的价格</span>
                 </div>
               )}
 
@@ -702,7 +726,6 @@ export function UsageAnalysisPanel({
                 <table className="w-full text-left text-sm">
                   <thead className="bg-muted text-muted-foreground font-medium">
                     <tr>
-                      {onSaveModelPrice && <th className="px-4 py-3 text-center">操作</th>}
                       <th className="px-4 py-3">渠道</th>
                       <th className="px-4 py-3">模型</th>
                       <th className="px-4 py-3 text-right">请求次数</th>
@@ -716,7 +739,7 @@ export function UsageAnalysisPanel({
                   <tbody className="divide-y divide-border">
                     {analysisData.length === 0 ? (
                       <tr>
-                        <td colSpan={onSaveModelPrice ? 9 : 8} className="px-4 py-8 text-center text-muted-foreground">
+                        <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
                           {analysisLoading ? '查询中...' : '暂无数据'}
                         </td>
                       </tr>
@@ -724,26 +747,8 @@ export function UsageAnalysisPanel({
                       analysisData.map((entry, index) => {
                         const price = rowPrices[index] || { prompt: defaultPromptPrice, completion: defaultCompletionPrice };
                         const rowCost = (entry.total_prompt_tokens * price.prompt + entry.total_completion_tokens * price.completion) / 1_000_000;
-                        const modelPriceKey = getModelPriceKey ? getModelPriceKey(entry) : `${entry.provider}-${entry.model}`;
-                        const isSaved = savedModelPriceKeys?.includes(modelPriceKey) ?? false;
-                        const isSaving = savingModelPriceKey === modelPriceKey;
                         return (
                           <tr key={`${entry.provider}-${entry.model}-${index}`} className="hover:bg-muted/50 transition-colors">
-                            {onSaveModelPrice && (
-                              <td className="px-4 py-3 text-center">
-                                <div className="flex flex-col items-center gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => onSaveModelPrice(entry, index)}
-                                    disabled={isSaving}
-                                    className="px-2 py-1 text-xs rounded-md border border-border bg-background hover:bg-muted text-foreground disabled:opacity-50"
-                                  >
-                                    {isSaving ? '保存中...' : '保存默认'}
-                                  </button>
-                                  {isSaved && <span className="text-[11px] text-emerald-600 dark:text-emerald-400">已配置</span>}
-                                </div>
-                              </td>
-                            )}
                             <td className="px-4 py-3 font-medium text-foreground">{entry.provider}</td>
                             <td className="px-4 py-3 text-foreground font-mono text-xs">{entry.model}</td>
                             <td className="px-4 py-3 text-right text-muted-foreground">{formatNumber(entry.request_count)}</td>
