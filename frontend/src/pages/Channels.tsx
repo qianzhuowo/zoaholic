@@ -28,6 +28,7 @@ interface ModelMapping {
 interface ProviderFormData {
   provider: string;
   engine: string;
+  remark: string;
   base_url: string;
   api_keys: ApiKeyObj[];
   model_prefix: string;
@@ -181,6 +182,7 @@ export default function Channels() {
       setFormData({
         provider: provider.provider || provider.name || '',
         engine: provider.engine || '',
+        remark: provider.remark || '',
         base_url: provider.base_url || '',
         api_keys: parsedKeys,
         model_prefix: provider.model_prefix || '',
@@ -205,6 +207,7 @@ export default function Channels() {
       setFormData({
         provider: '',
         engine: channelTypes.length > 0 ? channelTypes[0].id : '',
+        remark: '',
         base_url: '',
         api_keys: [],
         model_prefix: '',
@@ -570,6 +573,7 @@ export default function Channels() {
     return {
       provider: formData.provider,
       base_url: formData.base_url,
+      remark: formData.remark || undefined,
       model_prefix: formData.model_prefix || undefined,
       api: finalApi,
       model: finalModels,
@@ -635,6 +639,7 @@ export default function Channels() {
 
     const targetProvider: any = {
       provider: formData.provider,
+      remark: formData.remark || undefined,
       base_url: formData.base_url,
       model_prefix: formData.model_prefix || undefined,
       api: finalApi,
@@ -695,8 +700,14 @@ export default function Channels() {
             <div>
               <div className={`font-medium ${isEnabled ? 'text-foreground' : 'text-muted-foreground'}`}>{p.provider}</div>
               <div className="text-xs text-muted-foreground font-mono">{p.engine || 'openai'}</div>
+              {p.remark && (
+                <div className="mt-1 text-xs text-muted-foreground break-words whitespace-pre-wrap max-w-[220px]">
+                  {p.remark}
+                </div>
+              )}
             </div>
           </div>
+
           <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${isEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-500' : 'bg-red-500/10 text-red-600 dark:text-red-500'}`}>
             {isEnabled ? <CheckCircle2 className="w-3 h-3" /> : <X className="w-3 h-3" />}
             {isEnabled ? '启用' : '禁用'}
@@ -799,7 +810,14 @@ export default function Channels() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <ProviderLogo name={p.provider} />
-                        <span className={`font-medium truncate ${isEnabled ? 'text-foreground' : 'text-muted-foreground'}`}>{p.provider}</span>
+                        <div className="min-w-0">
+                          <div className={`font-medium truncate ${isEnabled ? 'text-foreground' : 'text-muted-foreground'}`}>{p.provider}</div>
+                          {p.remark && (
+                            <div className="text-xs text-muted-foreground truncate max-w-[220px]" title={p.remark}>
+                              {p.remark}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="px-4 py-3">
@@ -899,6 +917,14 @@ export default function Channels() {
                           {channelTypes.map(c => <option key={c.id} value={c.id}>{c.description || c.id}</option>)}
                         </select>
                       </div>
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-foreground mb-1.5 block">备注</label>
+                      <textarea
+                        value={formData.remark}
+                        onChange={e => updateFormData('remark', e.target.value)}
+                        rows={3} placeholder="填写该渠道的用途、来源、限制说明等" className="w-full bg-background border border-border focus:border-primary px-3 py-2 rounded-lg text-sm outline-none text-foreground"
+                      />
                     </div>
                     <div>
                       <label className="text-sm font-medium text-foreground mb-1.5 block">API 地址 (Base URL)</label>
