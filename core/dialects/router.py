@@ -8,6 +8,7 @@ import json
 from typing import Any, Dict, TYPE_CHECKING
 
 from core.json_utils import json_loads, json_dumps_text
+from core.stream_utils import OwnedAsyncIterator, close_async_iterator
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
@@ -248,7 +249,14 @@ def _create_generic_handler(dialect_id: str, endpoint: EndpointDefinition):
             return openai_error_response(f"{dialect_id} dialect not registered", 500)
 
         try:
-            native_body: Dict[str, Any] = await request.json()
+            scope = getattr(request, "scope", {})
+            if "_zoaholic_parsed_json" in scope:
+                native_body = scope.pop("_zoaholic_parsed_json")
+                # Consume the replayed body once so disconnect handling still reads the socket.
+                await request.body()
+                request._json = native_body
+            else:
+                native_body = await request.json()
         except Exception:
             native_body = {}
 
@@ -272,7 +280,13 @@ def _create_generic_handler(dialect_id: str, endpoint: EndpointDefinition):
             passthrough_only=endpoint.passthrough_only,
         )
 
-        if resp.headers.get("x-zoaholic-passthrough") or resp.status_code != 200:
+        # Inbound plugins may inspect the original body while request_model runs.
+        # Once routing is complete, streaming doesn't need its byte cache.
+        if "_zoaholic_parsed_json" not in scope and hasattr(request, "_body"):
+            request._body = b""
+
+        if (resp.headers.get("x-zoaholic-passthrough") or resp.status_code != 200
+                or getattr(resp, "rendered_dialect_id", None) == dialect_id):
             return resp
 
         if resp.media_type == "text/event-stream" and hasattr(resp, "body_iterator"):
@@ -301,9 +315,9 @@ def _create_generic_handler(dialect_id: str, endpoint: EndpointDefinition):
                     # 修改方式：无论正常结束、客户端断开还是转换异常，都显式关闭原响应迭代器。
                     # 目的：退出 client.stream 上下文并把连接归还 httpx 连接池。
                     if hasattr(source_iterator, "aclose"):
-                        await source_iterator.aclose()
+                        await close_async_iterator(source_iterator)
 
-            return LoggingStreamingResponse(convert_stream(), media_type="text/event-stream",
+            return LoggingStreamingResponse(OwnedAsyncIterator(convert_stream(), resp.body_iterator), media_type="text/event-stream",
                                             current_info=current_info, app=app, debug=debug,
                                             dialect_id=dialect_id)
 

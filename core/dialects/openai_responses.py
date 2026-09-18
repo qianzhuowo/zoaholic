@@ -323,7 +323,8 @@ async def render_responses_response(
         ]
     }
     """
-    if canonical_response.get("error"):
+    # Make explicit re-rendering safe, including native failed Responses objects.
+    if canonical_response.get("object") == "response" or canonical_response.get("error"):
         return canonical_response
     from .responses_stream import ResponsesStreamRenderer
     renderer = ResponsesStreamRenderer(model)
@@ -368,6 +369,15 @@ async def render_responses_stream(canonical_sse_chunk: str) -> str:
         canonical = json_loads(data_str)
     except Exception:
         return canonical_sse_chunk
+
+    error = canonical.get("error")
+    if error:
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        event = {"type": "error", "message": error.get("message", "Upstream stream failed"),
+                 "code": error.get("code") or error.get("type") or "server_error",
+                 "param": error.get("param")}
+        return f"event: error\ndata: {json_dumps_text(event, ensure_ascii=False)}\n\n"
 
     usage = canonical.get("usage")
     if isinstance(usage, dict):

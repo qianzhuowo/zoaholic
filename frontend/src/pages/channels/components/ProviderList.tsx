@@ -1,6 +1,6 @@
 import { BarChart3, CheckCircle2, Edit, Files, Folder, Play, Power, Puzzle, Search, Trash2, X, XCircle } from 'lucide-react';
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 
 import { ProviderLogo } from '../../../components/ProviderLogos';
 import type { ProviderSortMode, Segment } from '../types';
@@ -21,6 +21,7 @@ function WeightInput({
   onClick?: (e: React.MouseEvent) => void;
 }) {
   const [draft, setDraft] = useState<string>(String(value));
+  const cancelCommitRef = useRef(false);
 
   // 外部权重变化（例如保存成功后刷新）时，同步回本地草稿，避免显示陈旧值。
   useEffect(() => {
@@ -28,6 +29,11 @@ function WeightInput({
   }, [value]);
 
   const commit = () => {
+    if (cancelCommitRef.current) {
+      cancelCommitRef.current = false;
+      setDraft(String(value));
+      return;
+    }
     const parsed = parseInt(draft, 10);
     const next = Number.isNaN(parsed) ? 0 : parsed;
     if (next !== value) {
@@ -49,6 +55,7 @@ function WeightInput({
           e.preventDefault();
           (e.target as HTMLInputElement).blur();
         } else if (e.key === 'Escape') {
+          cancelCommitRef.current = true;
           setDraft(String(value));
           (e.target as HTMLInputElement).blur();
         }
@@ -110,8 +117,23 @@ export function ProviderList({
   handleUpdateWeight, buildSubChannelProvider, handleToggleSubChannel, openSubChannelEdit, handleDeleteSubChannel,
   renderMobileVirtualRoutesAccordion, renderDesktopVirtualRoutesAccordionRows,
 }: ProviderListProps) {
-  // Mobile Card Component
-  const ProviderCard = ({ p, idx }: { p: any; idx: number }) => {
+  // 修改原因：ProviderCard 原定义在组件函数体内，每次渲染都产生新组件类型，React 会把全部移动端卡片卸载重建，滚动锚定失效后页面回弹。
+  // 修改方式：用 useMemo 固定组件类型，处理器通过 ref 透传保持最新。
+  // 目的：列表重渲染只更新属性而不再重建 DOM 节点，移动端滚动位置保持稳定。
+  const cardActionsRef = useRef({} as any);
+  cardActionsRef.current = {
+    getProviderAnalyticsName, setAnalyticsProvider, setAnalyticsOpen, openTestDialog,
+    handleToggleProvider, handleCopyProvider, openModal, handleDeleteProvider,
+    handleUpdateWeight, buildSubChannelProvider, handleToggleSubChannel,
+    openSubChannelEdit, handleDeleteSubChannel,
+  };
+  const ProviderCard = useMemo(() => ({ p, idx }: { p: any; idx: number }) => {
+    const {
+      getProviderAnalyticsName, setAnalyticsProvider, setAnalyticsOpen, openTestDialog,
+      handleToggleProvider, handleCopyProvider, openModal, handleDeleteProvider,
+      handleUpdateWeight, buildSubChannelProvider, handleToggleSubChannel,
+      openSubChannelEdit, handleDeleteSubChannel,
+    } = cardActionsRef.current;
     const isEnabled = p.enabled !== false;
     const groups = Array.isArray(p.groups) ? p.groups : p.group ? [p.group] : ['default'];
     const plugins = p.preferences?.enabled_plugins || [];
@@ -216,7 +238,7 @@ export function ProviderList({
         )}
       </div>
     );
-  };
+  }, []);
 
 
   return (

@@ -13,6 +13,10 @@ formatted.yaml
 api.json
 api.*.json
 
+# local config backups (contain real credentials)
+api.yaml.stale_*.bak
+api.yaml.*.bak
+
 # runtime data / volumes
 data/
 postgres_data/
@@ -45,6 +49,10 @@ htmlcov/
 **/dist/
 **/.vite/
 **/.cache/
+*.tsbuildinfo
+
+# Runtime/test logs are local output, not source files.
+*.log
 
 npm-debug.log*
 yarn-debug.log*
@@ -87,11 +95,8 @@ plugins/secret_plugins/
 # alembic.ini
 
 .limcode/
-test/
-# 修改原因：根级 test/ 忽略规则会覆盖 frontend/test，导致前端回归测试文件默认无法进入版本控制。
-# 修改方式：只对 frontend/test 目录追加例外，不改变根目录运行时 test 数据的忽略行为。
-# 目的：让前端轻量回归测试可以随源码一起保存，避免移动端抽屉布局问题回退。
-!frontend/test/
-!frontend/test/**frontend/test/
-.limcode/
-tests/
+# Only root test/ has a restricted allowlist; do not match frontend/test/.
+/test/*
+!/test/test_*.py
+# frontend/test/ and tests/ source files are tracked normally.
+# Do not add !frontend/test/**: it would re-include caches and logs.
