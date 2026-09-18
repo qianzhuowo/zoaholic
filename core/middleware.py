@@ -313,13 +313,24 @@ class StatsMiddleware:
                     api_index, byok_template_key, byok_real_key = byok_result
                     token = byok_template_key
 
+            # Standard /v1 management requests carry the JWT issued by /auth/login.
+            # Match verify_api_key's admin mapping before rejecting unknown API keys;
+            # keep only the configured key (never the JWT) in request statistics.
+            from core.auth import _is_admin_jwt_token, _resolve_admin_api_index
+            is_admin_jwt = _is_admin_jwt_token(token)
+            if api_index is None and is_admin_jwt:
+                admin_index = _resolve_admin_api_index(app)
+                if admin_index is not None and 0 <= admin_index < len(api_list):
+                    api_index = admin_index
+                    token = api_list[admin_index]
+
             if api_index is not None:
                 # 修改原因：Key 级启用开关需要在中间件标准鉴权分支同样生效（方言前缀变动时的兜底路径）。
                 # 修改方式：与 core/auth.py 使用同一判定函数；admin JWT 豁免。
                 # 目的：禁用后所有入口一致拒绝。
                 try:
-                    from core.auth import is_api_key_disabled, _is_admin_jwt_token
-                    if is_api_key_disabled(app, api_index) and not _is_admin_jwt_token(token):
+                    from core.auth import is_api_key_disabled
+                    if is_api_key_disabled(app, api_index) and not is_admin_jwt:
                         response = openai_error_response("API Key has been disabled", 403)
                         await response(scope, receive, send)
                         reset_byok_context(byok_context_tokens)
