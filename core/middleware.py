@@ -168,23 +168,23 @@ class StatsMiddleware:
     def _get_client_ip(scope: Scope, headers: list) -> str:
         """
         获取客户端真实 IP。
-        优先级：X-Forwarded-For > X-Real-IP > scope["client"]
+
+        修改原因：旧逻辑无条件信任转发头且取 XFF 最左值，可被伪造。
+        修改方式：改用 core.client_ip.resolve_client_ip，仅当直连对端属于
+        TRUSTED_PROXIES 时才解析转发头，并按右向左跳过可信代理取值。
+        目的：IP 黑名单、配额和统计使用的地址不能被外部直连伪造。
         """
         headers_dict = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in headers}
-
-        # X-Forwarded-For: client, proxy1, proxy2 —— 取第一个
-        forwarded_for = headers_dict.get("x-forwarded-for")
-        if forwarded_for:
-            real_ip = forwarded_for.split(",")[0].strip()
-            if real_ip:
-                return real_ip
-
-        real_ip_header = headers_dict.get("x-real-ip")
-        if real_ip_header:
-            return real_ip_header.strip()
-
         client = scope.get("client")
-        return client[0] if client else "unknown"
+        peer_ip = client[0] if client else None
+
+        from core.client_ip import resolve_client_ip
+
+        return resolve_client_ip(
+            peer_ip,
+            forwarded_for=headers_dict.get("x-forwarded-for"),
+            real_ip=headers_dict.get("x-real-ip"),
+        )
 
     def _normalize_endpoint(self, method: str, path: str) -> str:
         """归一化端点路径，将带模型名的路径转换为模板格式"""
