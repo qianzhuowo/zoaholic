@@ -1043,8 +1043,8 @@ async def health_check():
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code == 404:
-        token = await get_api_key(request)
-        logger.error(f"404 Error: {exc.detail} api_key: {token}")
+        # 404 也可能来自管理 API，不应将管理员 JWT 或 API Key 写入日志。
+        logger.error(f"404 Error: {exc.detail}")
     if isinstance(exc.detail, dict) and exc.detail.get("type") == "ip_blocked":
         # 修改原因：IP 黑名单命中需要返回需求指定的 error.type，而默认 403 会变成 permission_denied_error。
         # 修改方式：当依赖鉴权抛出的 detail 带有 type=ip_blocked 时，显式传入 error_type。
