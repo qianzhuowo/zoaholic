@@ -100,3 +100,36 @@ plugins/secret_plugins/
 !/test/test_*.py
 # frontend/test/ and tests/ source files are tracked normally.
 # Do not add !frontend/test/**: it would re-include caches and logs.
+
+# Packaging / isolated test environments
+build/
+.eggs/
+.tox/
+.nox/
+pip-wheel-metadata/
+.hypothesis/
+
+# Local operational scripts and scratch output
+.tmp/
+.temp/
+/tmp/
+/temp/
+
+# Test reports (keep source tests and dependency lockfiles versioned)
+.coverage.*
+/coverage.xml
+/junit.xml
+/junit-*.xml
+test-results/
+test-reports/
+playwright-report/
+blob-report/
+.nyc_output/
+yarn-error.log*
+
+# New root-level ad-hoc tests and explicitly local suites are not project tests.
+/test_*.py
+/tests/local/
+/tests/scratch/
+/test/local/
+/test/scratch/
