@@ -117,9 +117,9 @@ pip-wheel-metadata/
 
 # Test reports (keep source tests and dependency lockfiles versioned)
 .coverage.*
-/coverage.xml
-/junit.xml
-/junit-*.xml
+coverage.xml
+junit.xml
+junit-*.xml
 test-results/
 test-reports/
 playwright-report/
@@ -133,3 +133,29 @@ yarn-error.log*
 /tests/scratch/
 /test/local/
 /test/scratch/
+
+# Local deployment backups, build archives and TLS acceptance output
+/security-backups/
+/security-builds/
+/runtime-research/
+/zoaholic-ca-build-*.tar.gz
+/tls-verification*.json
+/build-*.log
+*.core
+core.[0-9]*
+*.stdout
+*.stderr
+
+# Local tool state, alternative virtualenvs and package caches
+.uv-cache/
+.venv-*/
+venv-*/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+
+# Explicitly local tests; formal tests elsewhere remain versioned.
+/frontend/test/local/
+/frontend/test/scratch/
+/core/test/local/
+/core/test/scratch/

@@ -7,7 +7,9 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-RUN npm run build
+# Optional heap tuning for memory-limited builders; runtime Node settings are unchanged.
+ARG FRONTEND_NODE_OPTIONS=""
+RUN NODE_OPTIONS="${FRONTEND_NODE_OPTIONS}" npm run build
 
 # ===============
 # Stage 2: Python deps
@@ -39,6 +41,11 @@ COPY . .
 
 # 将前端产物放入后端 static/ 目录（FastAPI 直接挂载）
 COPY --from=frontend_builder /app/static ./static
+
+# Distrust affected roots in BOTH Debian's bundle and OpenSSL hash directory.
+# Run after all COPY operations so stale build artifacts cannot bypass the gate.
+# certifi is checked independently; no blanket TLS/env override is used.
+RUN python scripts/ca_guard.py --apply-system --verify
 
 # 部分云平台会注入 $PORT；用 shell 形式让变量生效
 # 部分云平台会注入 $PORT；用 shell 形式让变量生效
