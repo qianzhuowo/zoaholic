@@ -95,6 +95,11 @@ async def fetch_firebase_vertex_response(client, url, headers, payload, model, t
             yield chunk
 
 
+async def patch_passthrough_firebase_vertex_payload(payload, modifications, request, engine, provider, api_key=None):
+    from core.channels.gemini_channel import patch_passthrough_gemini_payload
+    return await patch_passthrough_gemini_payload(payload, modifications, request, engine or "firebaseVertex", provider, api_key)
+
+
 class FirebaseVertexChannelAdapter:
     """
     Firebase Vertex AI 渠道适配器
@@ -103,11 +108,13 @@ class FirebaseVertexChannelAdapter:
     type_name = "firebaseVertex"
 
     request_adapter = staticmethod(get_firebase_vertex_payload)
+    passthrough_payload_adapter = staticmethod(patch_passthrough_firebase_vertex_payload)
     stream_adapter = staticmethod(fetch_firebase_vertex_response_stream)
     response_adapter = staticmethod(fetch_firebase_vertex_response)
 
 
 # ==================== 插件生命周期函数 ====================
+
 
 def setup(manager: "PluginManager"):
     """插件初始化"""
@@ -133,6 +140,7 @@ def setup(manager: "PluginManager"):
             auth_header="x-goog-api-key: {api_key}",
             description="Firebase Vertex AI",
             request_adapter=FirebaseVertexChannelAdapter.request_adapter,
+            passthrough_payload_adapter=FirebaseVertexChannelAdapter.passthrough_payload_adapter,
             stream_adapter=FirebaseVertexChannelAdapter.stream_adapter,
             response_adapter=FirebaseVertexChannelAdapter.response_adapter,
             passthrough_dialects=["gemini"],

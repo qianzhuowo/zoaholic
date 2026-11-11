@@ -128,12 +128,6 @@ def _resolve_cc_version(provider) -> str:
     return value or CLAUDE_CODE_CLI_VERSION
 
 
-def _strip_gateway_headers(headers: dict) -> dict:
-    """清洗响应头中的网关/代理指纹前缀。"""
-    return {
-        k: v for k, v in headers.items()
-        if not any(k.lower().startswith(p) for p in _GATEWAY_HEADER_PREFIXES)
-    }
 # 修改原因：anthropic-beta 头的完整集合是 Anthropic 判定请求来源的关键维度之一，
 #   缺少任何"官方 CLI 请求才带"的 beta 都会被降级到第三方额度。
 # 修改方式：对齐 sub2api FullClaudeCodeMimicryBetas() 的完整列表及顺序。
@@ -914,19 +908,6 @@ def _build_billing_header(messages: list, version: str = "", entrypoint: str = "
     )
 
 
-def _has_billing_header(system) -> bool:
-    """检查 system 中是否已有 billing header。"""
-    if isinstance(system, str):
-        return system.strip().startswith(_BILLING_HEADER_PREFIX)
-    if isinstance(system, list) and system:
-        first = system[0]
-        if isinstance(first, dict):
-            return (first.get("text") or "").strip().startswith(_BILLING_HEADER_PREFIX)
-        if isinstance(first, str):
-            return first.strip().startswith(_BILLING_HEADER_PREFIX)
-    return False
-
-
 def _sanitize_for_plan_billing(payload: dict, headers: dict | None = None, version_override: str = "") -> dict:
     """清洗 payload 绕过 Anthropic 第三方检测，使请求走 plan limits 而非 extra usage。
 
@@ -987,8 +968,8 @@ def _sanitize_for_plan_billing(payload: dict, headers: dict | None = None, versi
         payload["system"].append({"type": "text", "text": original_system_text})
 
     # ── Layer 3: Tool name 重命名 ──
-    # 修改原因：原有的 _TOOL_RENAME_MAP 只覆盖了40个通用名，Clonoth 等客户端特有的
-    #   snake_case 工具名（list_dir, save_memory, discord_manage 等）不在映射表中，
+    # 修改原因：原有的 _TOOL_RENAME_MAP 只覆盖了40个通用名，部分第三方客户端特有的
+    #   snake_case 工具名（list_dir, read_file, web_search 等）不在映射表中，
     #   原样发给上游会被 Anthropic 判定为第三方。
     # 修改方式：先查映射表，未命中且包含下划线的名称自动转 PascalCase。
     # 目的：确保所有工具名都以 PascalCase 形式发往上游，响应侧再反向还原。

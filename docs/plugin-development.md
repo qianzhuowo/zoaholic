@@ -1186,7 +1186,7 @@ OAuth 渠道开发涉及后端凭据状态、token 刷新、额度缓存、渠�
 
 #### `OAuthProvider`
 
-`OAuthProvider` 位于 `core/oauth/providers/base.py`，是各 OAuth 渠道 provider 的基类。
+`OAuthProvider` 位于 `core/oauth/base.py`，是各 OAuth 渠道 provider 的基类。
 
 基类接口：
 
@@ -1294,7 +1294,7 @@ register_channel(
 #### Provider 模板
 
 ```python
-from core.oauth.providers.base import OAuthProvider
+from core.oauth.base import OAuthProvider
 
 
 class ExampleProvider(OAuthProvider):

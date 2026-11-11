@@ -9,7 +9,7 @@ OpenAI Responses API 方言
 
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
-from core.json_utils import json_loads, json_dumps_text
+from core.json_utils import json_dumps_text
 from core.models import RequestModel, Message, ContentItem
 from core.usage import extract_cache_usage
 
@@ -343,61 +343,6 @@ async def render_responses_response(
     return renderer.response
 
 
-async def render_responses_stream(canonical_sse_chunk: str) -> str:
-    """
-    Legacy single-chunk callback. Production HTTP/WS Responses routes use
-    responses_stream.render_responses_iterator with request-scoped state; this
-    compatibility callback cannot reconstruct tool calls across chunks.
-
-    将 Canonical SSE 流转换为 Responses API 流格式
-
-    Chat Completions 流事件:
-    data: {"choices": [{"delta": {"content": "..."}}]}
-
-    Responses API 流事件:
-    event: response.output_text.delta
-    data: {"type": "response.output_text.delta", "delta": "..."}
-    """
-    if not isinstance(canonical_sse_chunk, str) or not canonical_sse_chunk.startswith("data: "):
-        return canonical_sse_chunk
-
-    data_str = canonical_sse_chunk[6:].strip()
-    if data_str == "[DONE]":
-        return canonical_sse_chunk
-
-    try:
-        canonical = json_loads(data_str)
-    except Exception:
-        return canonical_sse_chunk
-
-    error = canonical.get("error")
-    if error:
-        if not isinstance(error, dict):
-            error = {"message": str(error)}
-        event = {"type": "error", "message": error.get("message", "Upstream stream failed"),
-                 "code": error.get("code") or error.get("type") or "server_error",
-                 "param": error.get("param")}
-        return f"event: error\ndata: {json_dumps_text(event, ensure_ascii=False)}\n\n"
-
-    usage = canonical.get("usage")
-    if isinstance(usage, dict):
-        # 经过内核重组的 usage-only chunk 在 Responses API 中用 response.completed 表达。
-        event = {
-            "type": "response.completed",
-            "response": {
-                "id": canonical.get("id", ""),
-                "object": "response",
-                "status": "completed",
-                "model": canonical.get("model", ""),
-                "usage": _responses_usage_from_canonical(usage),
-            },
-        }
-        return f"event: response.completed\ndata: {json_dumps_text(event, ensure_ascii=False)}\n\n"
-
-    # 其它流式内容保持原有行为，避免在本次缓存字段修复中改变文本与工具调用事件结构。
-    return canonical_sse_chunk
-
-
 def parse_responses_usage(data: Any) -> Optional[Dict[str, int]]:
     """从 Responses API 格式中提取 usage"""
     if not isinstance(data, dict):
@@ -525,6 +470,11 @@ async def responses_subpath_handler(
 # ============================================================
 
 
+def _create_responses_stream_renderer():
+    from .responses_stream import create_responses_stream_renderer
+    return create_responses_stream_renderer()
+
+
 def register() -> None:
     """注册 OpenAI Responses API 方言"""
     register_dialect(
@@ -534,7 +484,7 @@ def register() -> None:
             description="OpenAI Responses API 格式（GPT-5/o1/o3 等新模型专用）",
             parse_request=parse_responses_request,
             render_response=render_responses_response,
-            render_stream=render_responses_stream,
+            render_stream_factory=_create_responses_stream_renderer,
             parse_usage=parse_responses_usage,
             target_engine="openai-responses",
             endpoints=[

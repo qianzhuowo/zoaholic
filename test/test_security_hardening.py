@@ -87,6 +87,7 @@ def gateway(monkeypatch):
     app.state.api_list = ["fixture-user-key"]
     app.state.paid_api_keys_states = {}
     app.state.global_rate_limit = [(10000, 60)]
+    app.state.admin_initialized = True
     ready = asyncio.Event()
     ready.set()
     monkeypatch.setitem(sys.modules, "main", SimpleNamespace(_db_ready=ready))
@@ -193,12 +194,7 @@ def test_probe_status_code_semantics_preserved():
     assert _public_probe_payload(app, readiness=True)[1] == 503
 
 
-# ==================== setup 状态精简 ====================
-
-def test_setup_status_only_exposes_needs_setup():
-    from routes.setup import SetupStatus
-
-    assert set(SetupStatus.model_fields) == {"needs_setup"}
+# setup 状态字段由上游初始化防接管契约决定（见 test_initialization_security.py）。
 
 
 # ==================== debug 路由 ====================
@@ -241,6 +237,8 @@ def test_debug_requires_admin_credentials():
     import routes.debug as debug_routes
 
     app = FastAPI()
+    app.state.admin_initialized = True
+    app.state.api_list = ["fixture-admin-key"]
     app.include_router(debug_routes.router)
     assert _req(app, "GET", "/debug/memory").status_code == 403
 
@@ -256,6 +254,8 @@ def test_debug_router_not_registered_by_default(monkeypatch):
 
     def _status(pkg):
         app = FastAPI()
+        app.state.admin_initialized = True
+        app.state.api_list = ["fixture-admin-key"]
         app.include_router(pkg.api_router)
         return _req(app, "GET", "/debug/memory").status_code
 

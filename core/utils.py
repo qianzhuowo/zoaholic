@@ -27,7 +27,7 @@ from core.response_builders import (
     generate_chunked_image_md, get_image_format, encode_image,
     get_image_from_url, get_encode_image, get_base64_image,
     _convert_webp_base64_to_png, _prepare_image_for_upload,
-    upload_image_to_0x0st, parse_json_safely,
+    parse_json_safely,
 )
 
 # 本地 API Key 前缀：用于判断 provider 名是否为本地聚合器 Key
@@ -66,6 +66,14 @@ def get_model_dict(provider):
         # 修改方式：对带 _virtual_route_provider 标记的临时 provider，优先返回已注入虚拟名映射的运行时缓存副本。
         # 目的：确保 request.model 为虚拟模型名时，所有渠道实现都能解析到真实上游模型名。
         return dict(provider["_model_dict_cache"])
+
+    # 修改原因：service.update_config 会为每个渠道注入 _model_dict_cache，但热更新中途失败等异常路径会漏注入，
+    # 导致下游 provider["_model_dict_cache"] 直接下标时抛 KeyError。
+    # 修改方式：get_model_dict 作为统一读取入口，已有缓存时直接返回；缓存缺失时下面照常重算。
+    # 目的：让所有调用点改用 get_model_dict 后既能享受缓存，又不会因运行时字段缺失而 500。
+    cached_model_dict = provider.get("_model_dict_cache")
+    if isinstance(cached_model_dict, dict):
+        return cached_model_dict
 
     model_dict = {}
     prefix = provider.get('model_prefix', '').strip()
@@ -252,61 +260,6 @@ def get_proxy(proxy, client_config = {}):
             client_config["proxy"] = proxy
     return client_config
 
-async def update_initial_model(provider):
-    try:
-        engine, stream_mode, _ = get_engine(provider, endpoint=None, original_model="")
-        # print("engine", engine, provider)
-        api_url = provider['base_url']
-        api = provider['api']
-        proxy = safe_get(provider, "preferences", "proxy", default=None)
-        client_config = get_proxy(proxy)
-        if engine == "gemini":
-            before_v1 = api_url.split("/v1beta")[0]
-            url = before_v1 + "/v1beta/models"
-            params = {"key": api}
-            async with httpx.AsyncClient(**client_config) as client:
-                response = await client.get(url, params=params)
-
-            original_models = response.json()
-            if original_models.get("error"):
-                raise Exception({"error": original_models.get("error"), "endpoint": url, "api": api})
-
-            models = {"data": []}
-            for model in original_models["models"]:
-                models["data"].append({
-                    "id": model["name"].split("models/")[-1],
-                })
-        else:
-            endpoint = BaseAPI(api_url=api_url)
-            endpoint_models_url = endpoint.v1_models
-            if isinstance(api, list):
-                api = api[0]
-            if "v1/messages" in api_url:
-                headers = {"x-api-key": api, "anthropic-version": "2023-06-01"}
-            else:
-                headers = {"Authorization": f"Bearer {api}"}
-            async with httpx.AsyncClient(**client_config) as client:
-                response = await client.get(
-                    endpoint_models_url,
-                    headers=headers,
-                )
-            models = response.json()
-            if models.get("error"):
-                logger.error({"error": models.get("error"), "endpoint": endpoint_models_url, "api": api})
-                return []
-
-        # print(models)
-        models_list = models["data"]
-        models_id = [model["id"] for model in models_list]
-        set_models = set()
-        for model_item in models_id:
-            set_models.add(model_item)
-        models_id = list(set_models)
-        # print(models_id)
-        return models_id
-    except Exception:
-        traceback.print_exc()
-        return []
 
 def safe_get(data, *keys, default=None):
     for key in keys:
@@ -403,6 +356,16 @@ def truncate_for_logging(
             data = data.decode("utf-8", errors="replace")
 
         if isinstance(data, str):
+            # 若大体积 JSON 字符串（>256KB，如含 Base64 图片的请求/响应）中夹带超长字面量，
+            # 先用 C 正则原地截断 >4096 字符的巨型字符串字面量，避免全量 json.loads 展开 10MB+ AST 树
+            if len(data) > 256 * 1024 and not data.lstrip().startswith('data: '):
+                import re as _re_trunc
+                _ms = max_str_length
+                data = _re_trunc.sub(
+                    r'"([^"\\]{4096,})"',
+                    lambda m: f'"{m.group(1)[:_ms]}... [截断 {len(m.group(1)) - _ms} 字符]"',
+                    data,
+                )
             # 检测是否是 SSE 格式（以 "data: " 开头）
             stripped = data.strip()
             if stripped.startswith('data: '):

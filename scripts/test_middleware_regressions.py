@@ -56,7 +56,7 @@ class MiddlewareRegressions(unittest.IsolatedAsyncioTestCase):
                     {'api': 'audit-key', 'preferences': {'ENABLE_MODERATION': moderation}}]
         app = SimpleNamespace(state=SimpleNamespace(
             config={'api_keys': api_keys, 'preferences': preferences},
-            api_list=[item['api'] for item in api_keys], api_keys_db=[]))
+            api_list=[item['api'] for item in api_keys], api_keys_db=api_keys, admin_initialized=True))
         scope = {'type': 'http', 'path': '/v1/chat/completions', 'method': method,
                  'headers': [(b'content-type', content_type.encode()),
                              (b'authorization', b'Bearer audit-key')],

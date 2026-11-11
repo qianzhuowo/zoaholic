@@ -128,7 +128,10 @@ gemini2_5_pro_exp = ThreadSafeCircularList([
 
 # ============================================================
 
-gemini_max_token_65k_models = ["gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-flash-thinking", "gemini-2.5-flash"]
+gemini_max_token_65k_models = [
+    "gemini-2.5-pro", "gemini-2.0-pro", "gemini-2.0-flash-thinking", "gemini-2.5-flash",
+    "gemini-3", "gemini-4",
+]
 
 
 def create_jwt(client_email, private_key):
@@ -168,15 +171,37 @@ def create_jwt(client_email, private_key):
     return b'.'.join(segments).decode()
 
 
-async def get_access_token(client_email, private_key):
+def _extract_vertex_proxy_from_config(config: dict | None) -> str | None:
+    """优先从运行时配置中的 Vertex 渠道或全局 preferences 提取代理，兜底读取环境变量。"""
+    if isinstance(config, dict):
+        providers = config.get("providers")
+        if not isinstance(providers, list):
+            api_cfg = config.get("api_config") if isinstance(config.get("api_config"), dict) else {}
+            providers = api_cfg.get("providers") if isinstance(api_cfg.get("providers"), list) else []
+        for p in providers:
+            if not isinstance(p, dict):
+                continue
+            eng = str(p.get("engine") or "").strip()
+            if eng in ("vertex-gemini", "vertex-claude"):
+                p_proxy = safe_get(p, "preferences", "proxy", default=None) or p.get("proxy")
+                if isinstance(p_proxy, str) and p_proxy.strip():
+                    return p_proxy.strip()
+        g_proxy = safe_get(config, "preferences", "proxy", default=None)
+        if isinstance(g_proxy, str) and g_proxy.strip():
+            return g_proxy.strip()
+    return (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+    )
+
+
+async def get_access_token(client_email, private_key, proxy_url: str | None = None):
     """获取 Vertex AI 访问令牌"""
     jwt = await asyncio.to_thread(create_jwt, client_email, private_key)
-
-    # 修改原因：服务账号 JWT 换取 Google access_token 时直接访问 oauth2.googleapis.com，代理环境下裸连容易超时。
-    # 修改方式：按常见大小写环境变量读取 HTTPS_PROXY 或 HTTP_PROXY，并传给 httpx 的单数 proxy 参数。
-    # 目的：无代理环境传 None 保持原行为，有代理环境时 token 请求可以正常通过代理访问 Google。
-    proxy_url = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
-    async with httpx.AsyncClient(proxy=proxy_url) as client:
+    effective_proxy = proxy_url or _extract_vertex_proxy_from_config(None)
+    async with httpx.AsyncClient(proxy=effective_proxy, timeout=15.0) as client:
         response = await client.post(
             "https://oauth2.googleapis.com/token",
             data={
@@ -189,19 +214,16 @@ async def get_access_token(client_email, private_key):
         return response.json()["access_token"]
 
 
-
 class VertexProvider(OAuthProvider):
     """Vertex AI Service Account OAuth provider."""
     redirect_mode = "manual"
     localhost_redirect_uri = ""
 
     async def refresh_token(self, credential: dict, config=None) -> dict:
-        # 修改原因：Vertex AI 使用服务账号 JWT 换取 access_token，不走浏览器授权流程。
-        # 修改方式：从导入的 credential 读取 client_email/private_key，并复用现有 get_access_token 生成 Bearer token。
-        # 目的：让 OAuthManager 可以刷新并保存 Vertex AI 的短期 access_token。
+        import inspect
+        proxy_url = _extract_vertex_proxy_from_config(config)
         client_email = credential.get("client_email", "")
         private_key = credential.get("private_key", "")
-        # 自动检测：如果 refresh_token 字段是 service account JSON，解析并提取字段
         if not client_email or not private_key:
             raw_token = credential.get("refresh_token", "")
             if isinstance(raw_token, str) and raw_token.strip().startswith("{"):
@@ -219,8 +241,36 @@ class VertexProvider(OAuthProvider):
                 except (json.JSONDecodeError, KeyError):
                     pass
         if not client_email or not private_key:
+            rtok = str(credential.get("refresh_token") or "").strip()
+            cid = str(credential.get("client_id") or "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com").strip()
+            csec = str(credential.get("client_secret") or "d-FL95Q19q7MQmFpd7hHD0Ty").strip()
+            if rtok and not rtok.startswith("{") and cid and csec:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as _hc:
+                    _resp = await _hc.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": cid,
+                            "client_secret": csec,
+                            "refresh_token": rtok,
+                            "grant_type": "refresh_token",
+                        },
+                    )
+                    _resp.raise_for_status()
+                    _tdata = _resp.json()
+                credential["access_token"] = _tdata["access_token"]
+                credential["expires_at"] = int(time.time()) + int(_tdata.get("expires_in", 3500)) - 60
+                credential.setdefault("email", credential.get("project_id") or "gcloud_adc_user")
+                return credential
             raise ValueError("Missing client_email or private_key in credential")
-        access_token = await get_access_token(client_email, private_key)
+        try:
+            params = inspect.signature(get_access_token).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "proxy_url" in params and proxy_url:
+            access_token = await get_access_token(client_email, private_key, proxy_url=proxy_url)
+        else:
+            access_token = await get_access_token(client_email, private_key)
         credential["access_token"] = access_token
         credential["expires_at"] = int(time.time()) + 3500
         credential.setdefault("email", client_email)
@@ -291,20 +341,70 @@ def normalize_vertex_payload(payload: dict) -> dict:
     return payload
 
 
+_express_project_id_cache: dict[tuple[str, str], str] = {}
+
+
+def _is_vertex_express_key(api_key: str | None) -> bool:
+    if not api_key or not isinstance(api_key, str):
+        return False
+    s = api_key.strip()
+    if len(s) > 3 and s[2] == ".":
+        return True
+    for sep in ("|", ":"):
+        if sep in s:
+            _, rhs = s.split(sep, 1)
+            rhs = rhs.strip()
+            if len(rhs) > 3 and rhs[2] == ".":
+                return True
+    return False
+
+
+async def extract_vertex_express_project_id(api_key: str, base_url: str = "https://aiplatform.googleapis.com") -> tuple[str, str]:
+    """Parse or probe (project_id, actual_key) for a Vertex Express key (AQ.xxx)."""
+    raw = (api_key or "").strip()
+    for sep in ("|", ":"):
+        if sep in raw:
+            lhs, rhs = raw.split(sep, 1)
+            if len(rhs.strip()) > 3 and rhs.strip()[2] == ".":
+                return lhs.strip(), rhs.strip()
+    actual_key = raw
+    api_root = re.sub(r"/v1(?:beta\d*)?/?$", "", (base_url or "https://aiplatform.googleapis.com").strip().rstrip("/"))
+    cache_key = (api_root, actual_key)
+    if cache_key in _express_project_id_cache:
+        return _express_project_id_cache[cache_key], actual_key
+
+    probe_url = f"{api_root}/v1/publishers/google/models/gemini-2.0-flash:generateContent?key={actual_key}"
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=15.0) as client:
+            resp = await client.post(probe_url, headers={"Content-Type": "application/json"}, content="{}")
+            if resp.status_code in (400, 403, 404):
+                err_msg = ""
+                try:
+                    err_msg = (resp.json().get("error") or {}).get("message") or ""
+                except Exception:
+                    err_msg = resp.text or ""
+                m = re.search(r"projects/([^/\s]+)/locations/", err_msg)
+                if m:
+                    pid = m.group(1).strip()
+                    _express_project_id_cache[cache_key] = pid
+                    return pid, actual_key
+    except Exception:
+        pass
+    return "", actual_key
+
+
 async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     """构建 Vertex Gemini API 的请求 payload"""
     headers = {
         'Content-Type': 'application/json'
     }
-    if api_key and not (provider.get("client_email") and provider.get("private_key")):
-        # 修改原因：OAuthManager 会把 Vertex OAuth credential 解析后的 access_token 作为 api_key 传入。
-        # 修改方式：当 provider 没有服务账号字段时，把 api_key 写入 Authorization Bearer 头。
-        # 目的：让 OAuth 路径与传统服务账号路径共用 Vertex AI 的 Bearer 认证格式。
+    if isinstance(api_key, str) and api_key.strip().startswith("AIza"):
+        raise ValueError("AI Studio API Key (AIza...) is not supported in vertex-gemini channel")
+    is_express = _is_vertex_express_key(api_key)
+    if api_key and not is_express and not (provider.get("client_email") and provider.get("private_key")):
         headers['Authorization'] = f"Bearer {api_key}"
     elif provider.get("client_email") and provider.get("private_key"):
-        # 修改原因：仍需兼容 yaml 中直接配置服务账号 client_email/private_key 的传统路径。
-        # 修改方式：保留现有 JWT 换取 access_token 的逻辑，并写入 Authorization Bearer 头。
-        # 目的：新增 OAuth 支持时不破坏已有 Vertex AI 配置。
         access_token = await get_access_token(provider['client_email'], provider['private_key'])
         headers['Authorization'] = f"Bearer {access_token}"
     project_id = _get_vertex_project_id(provider)
@@ -324,23 +424,20 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     if vertex_base_url.endswith('#'):
         url = vertex_base_url[:-1].rstrip('/')
     elif "google-vertex-ai" in vertex_base_url:
-        url = vertex_base_url + "/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_ID}:{stream}".format(
-            LOCATION=await location.next(),
-            PROJECT_ID=project_id,
-            MODEL_ID=original_model,
-            stream=gemini_stream
-        )
-    elif api_key is not None and len(api_key) > 2 and api_key[2] == "." and "Authorization" not in headers:
-        url = f"{vertex_base_url}/publishers/google/models/{original_model}:{gemini_stream}?key={api_key}"
+        loc_val = await location.next()
+        url = f"{vertex_base_url}/projects/{project_id}/locations/{loc_val}/publishers/google/models/{original_model}:{gemini_stream}"
+    elif is_express:
         headers.pop("Authorization", None)
+        exp_pid, actual_key = await extract_vertex_express_project_id(api_key, vertex_base_url)
+        effective_pid = project_id or exp_pid
+        sse_suffix = "&alt=sse" if request.stream else ""
+        if effective_pid:
+            url = f"{vertex_base_url}/projects/{effective_pid}/locations/global/publishers/google/models/{original_model}:{gemini_stream}?key={actual_key}{sse_suffix}"
+        else:
+            url = f"{vertex_base_url}/publishers/google/models/{original_model}:{gemini_stream}?key={actual_key}{sse_suffix}"
     else:
-        url = "{BASE_URL}/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_ID}:{stream}".format(
-            BASE_URL=vertex_base_url,
-            LOCATION=await location.next(),
-            PROJECT_ID=project_id,
-            MODEL_ID=original_model,
-            stream=gemini_stream
-        )
+        loc_val = await location.next()
+        url = f"{vertex_base_url}/projects/{project_id}/locations/{loc_val}/publishers/google/models/{original_model}:{gemini_stream}"
 
     messages = []
     systemInstruction = None
@@ -352,16 +449,34 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
     # 目的：保证 functionCall 与 functionResponse 的数量和名称一一对应，孤立 tool 响应按声明的 name/tool_call_id 命名而非崩溃。
     tool_call_name_map = {}
     pending_fc_names = []
+    seen_non_system = False
     request_messages = copy.deepcopy(request.messages)
     for msg in request_messages:
         if msg.role == "assistant":
             msg.role = "model"
+        elif msg.role in ("system", "developer"):
+            if seen_non_system:
+                msg.role = "user"
+            else:
+                msg.role = "system"
+        if msg.role != "system":
+            seen_non_system = True
         content = []
         # 修改原因：Gemini 3.7+ 要求多轮对话中 functionCall parts 携带 thoughtSignature，缺失会 400。
         # 修改方式：从消息的 thoughtSignature 属性和 tool_call 的 extra_content.google.thoughtSignature 提取签名，
         #   附加到 functionCall part 上；无 tool_call 时附到最后一个 part。逻辑与 gemini_channel.py 一致。
         # 目的：OpenAI 格式经 vertex_channel 转换后的 payload 保留签名，避免上游校验失败。
-        msg_signature = getattr(msg, "thoughtSignature", None)
+        msg_signature = (
+            getattr(msg, "thoughtSignature", None)
+            or getattr(msg, "thought_signature", None)
+            or getattr(msg, "signature", None)
+        )
+        # 1. 先处理思维链（与 gemini_channel 对齐，确保 thought 在前、正文在后，签名落在正文或首个 FC 上）
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            content.append({"thought": True, "text": reasoning})
+
+        # 2. 再处理正文与多模态内容
         if isinstance(msg.content, list):
             for item in msg.content:
                 if item.type == "text":
@@ -399,12 +514,7 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                             }
                         })
         elif msg.content:
-            content = [{"text": msg.content}]
-
-        # 处理思维链（与 gemini_channel 对齐）
-        reasoning = getattr(msg, "reasoning_content", None)
-        if reasoning:
-            content.append({"thought": True, "text": reasoning})
+            content.append({"text": msg.content})
 
         if msg.role == "model" and msg.tool_calls:
             # 修改原因：工具调用可能与思维链/文本共存于同一 model 回合。
@@ -425,9 +535,16 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                     tool_call_name_map[tool_call.id] = tool_call.function.name
                 pending_fc_names.append(tool_call.function.name)
                 # thoughtSignature：优先从 tool_call.extra_content 取，首个 FC 兜底用消息级签名
-                sig = (getattr(tool_call, "extra_content", {}) or {}).get("google", {}).get("thoughtSignature")
+                _ec_google = (getattr(tool_call, "extra_content", {}) or {}).get("google", {}) or {}
+                sig = (
+                    _ec_google.get("thoughtSignature")
+                    or _ec_google.get("thought_signature")
+                    or _ec_google.get("signature")
+                    or getattr(tool_call, "thoughtSignature", None)
+                    or getattr(tool_call, "thought_signature", None)
+                )
                 if not sig and i == 0:
-                    sig = msg_signature
+                    sig = msg_signature or "skip_thought_signature_validator"
                 if sig:
                     fc_part["thoughtSignature"] = sig
                     msg_signature = None
@@ -450,23 +567,24 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
             # 修改原因：OpenAI 格式里每个 tool 响应是独立消息，但 Gemini 要求同一 function call turn 的全部响应合并在一个 function turn 的 parts 里。
             # 修改方式：上一条输出已是 function 回合时直接追加 part，否则才新开回合。
             # 目的：并行工具调用产生的多个响应共享同一 turn，满足上游 response/call parts 数量一致的校验。
+            from .gemini_channel import _extract_tool_result_text
             fr_part = {
                 "functionResponse": {
                     "name": function_call_name,
                     "response": {
                         "name": function_call_name,
                         "content": {
-                            "result": msg.content,
+                            "result": _extract_tool_result_text(msg.content),
                         }
                     }
                 }
             }
-            if messages and messages[-1].get("role") == "function":
+            if messages and messages[-1].get("role") == "user" and any("functionResponse" in p for p in messages[-1].get("parts", [])):
                 messages[-1]["parts"].append(fr_part)
             else:
                 messages.append(
                     {
-                        "role": "function",
+                        "role": "user",
                         "parts": [fr_part]
                     }
                 )
@@ -476,39 +594,29 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                 content[-1]["thoughtSignature"] = msg_signature
             messages.append({"role": msg.role, "parts": content})
         elif msg.role == "system" and content:
-            system_prompt = system_prompt + "\n\n" + content[0]["text"]
+            sys_txt = "".join([p.get("text", "") for p in content if "text" in p])
+            if sys_txt:
+                system_prompt = f"{system_prompt}\n\n{sys_txt}" if system_prompt else sys_txt
     if system_prompt.strip():
-        systemInstruction = {"parts": [{"text": system_prompt}]}
+        systemInstruction = {"parts": [{"text": system_prompt.strip()}]}
+
+    if messages and messages[-1].get("role") == "model":
+        messages.append({"role": "user", "parts": [{"thought": True, "text": " "}]})
 
     if any(off_model in original_model for off_model in gemini_max_token_65k_models):
         safety_settings = "OFF"
     else:
         safety_settings = "BLOCK_NONE"
 
+    from .gemini_channel import (
+        build_gemini_safety_settings,
+        inline_schema_refs,
+        process_tool_parameters,
+        apply_gemini_response_format,
+    )
     payload = {
         "contents": messages,
-        "safetySettings": [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": safety_settings
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": safety_settings
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": safety_settings
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": safety_settings
-            },
-            {
-                "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
-                "threshold": "BLOCK_NONE"
-            },
-        ]
+        "safetySettings": build_gemini_safety_settings(safety_settings, is_vertex=True),
     }
     if systemInstruction:
         payload["system_instruction"] = systemInstruction
@@ -525,110 +633,22 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
         'include_usage',
         'logprobs',
         'top_logprobs',
+        'response_format',
         'stream_options',
         'prompt',
         'size',
-        'max_tokens',  # will use max_output_tokens
         'parallel_tool_calls',
         'logit_bias',
         'extra_body',
         'thinking',
+        'chat_template_kwargs',
+        'min_p',
+        'reasoning_effort',
+        'service_tier',
+        'stop',
     ]
     generation_config = {}
-
-    def inline_schema_refs(parameters, extra_defs=None):
-        # 修改原因：MCP 等客户端的工具 schema 使用 JSON Schema $ref/$defs 共享类型定义，Gemini protobuf Schema 不认识 $ref 字段，直接报 Unknown name "$ref" 400；
-        #   且 RequestModel.model_dump 有意排除 defs 字段（防严格网关报错），dump 结果只剩悬空 $ref，需要从原始 pydantic 对象恢复定义。
-        # 修改方式：defs 优先取 parameters 内联的 $defs/definitions/defs，再用 extra_defs 补齐；无论 defs 是否为空都执行解析，
-        #   可解析的 $ref 原位展开为定义副本（$ref 同层其他属性覆盖定义同名字段），不可解析或展开超过 2 层的降级为宽松 object 并把引用名写入 description。
-        # 目的：保证发往 Gemini 的 schema 一定不含 $ref，递归引用按 Gemini 对 defs 递归深度的限制截断。
-        if not isinstance(parameters, dict):
-            return
-        defs = {}
-        for defs_key in ("$defs", "definitions", "defs"):
-            extracted = parameters.pop(defs_key, None)
-            if isinstance(extracted, dict):
-                defs.update(extracted)
-        if isinstance(extra_defs, dict):
-            for k, v in extra_defs.items():
-                defs.setdefault(k, v)
-
-        def _resolve(node, depth):
-            if isinstance(node, dict):
-                ref = node.get("$ref")
-                if isinstance(ref, str) and ref.startswith("#/"):
-                    name = ref.rsplit("/", 1)[-1]
-                    if depth >= 2 or name not in defs:
-                        node.pop("$ref", None)
-                        node.setdefault("type", "object")
-                        desc = node.get("description", "")
-                        node["description"] = f"{desc}\nSchema ref: {name}".strip()
-                    else:
-                        merged = copy.deepcopy(defs[name])
-                        for k, v in node.items():
-                            if k != "$ref":
-                                merged[k] = v
-                        node.clear()
-                        node.update(merged)
-                        _resolve(node, depth + 1)
-                        return
-                for value in node.values():
-                    _resolve(value, depth)
-            elif isinstance(node, list):
-                for item in node:
-                    _resolve(item, depth)
-
-        _resolve(parameters, 0)
-
-    def process_tool_parameters(data):
-        if isinstance(data, dict):
-            # 0. 处理逻辑组合符 (OpenAI anyOf/oneOf/allOf [..., null] -> Gemini nullable: True)
-            for key in ["anyOf", "oneOf", "allOf"]:
-                if key in data:
-                    logic_list = data.pop(key)
-                    if isinstance(logic_list, list) and logic_list:
-                        main_item = next((item for item in logic_list if isinstance(item, dict) and item.get("type") and item.get("type") != "null"), logic_list[0])
-                        if isinstance(main_item, dict):
-                            for k, v in main_item.items():
-                                if k not in data:
-                                    data[k] = v
-                        if any(isinstance(item, dict) and item.get("type") == "null" for item in logic_list):
-                            data["nullable"] = True
-
-            # 1. 移除 Gemini 不支持的字段
-            unsupported_fields = [
-                "additionalProperties", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength",
-                "pattern", "$schema", "dependencies", "dependentRequired", "dependentSchemas",
-                "unevaluatedItems", "unevaluatedProperties", "not", "minItems", "maxItems",
-                "uniqueItems", "minimum", "maximum", "multipleOf",
-            ]
-            for field in unsupported_fields:
-                data.pop(field, None)
-
-            # 2. 核心修复：确保 required 中的属性在 properties 中确实存在
-            properties = data.get("properties")
-            required = data.get("required")
-            if isinstance(required, list):
-                if isinstance(properties, dict):
-                    data["required"] = [field for field in required if field in properties]
-                    if not data["required"]:
-                        data.pop("required")
-                else:
-                    data.pop("required", None)
-
-            # 3. 将 'default' 值移入 'description'
-            if "default" in data:
-                default_value = data.pop("default")
-                description = data.get("description", "")
-                data["description"] = f"{description}\nDefault: {default_value}"
-
-            # 4. 递归处理
-            if isinstance(properties, dict):
-                for val in properties.values():
-                    process_tool_parameters(val)
-            items = data.get("items")
-            if isinstance(items, dict):
-                process_tool_parameters(items)
+    apply_gemini_response_format(request, generation_config)
 
     for field, value in request.model_dump(exclude_unset=True).items():
         if field not in miss_fields and value is not None:
@@ -658,19 +678,32 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                         process_tool_parameters(f_def["parameters"])
                     processed_tools.append(f_def)
 
+                tool_config = {"function_calling_config": {"mode": "AUTO"}}
+                tc = request.tool_choice
+                if tc:
+                    if tc == "required":
+                        tool_config["function_calling_config"]["mode"] = "ANY"
+                    elif tc == "none":
+                        tool_config["function_calling_config"]["mode"] = "NONE"
+                    elif isinstance(tc, dict) and tc.get("type") == "function":
+                        fn_name = (tc.get("function") or {}).get("name")
+                        if fn_name:
+                            tool_config["function_calling_config"]["mode"] = "ANY"
+                            tool_config["function_calling_config"]["allowed_function_names"] = [fn_name]
+                    elif hasattr(tc, "type") and tc.type == "function" and getattr(tc, "function", None):
+                        fn_name = getattr(tc.function, "name", None)
+                        if fn_name:
+                            tool_config["function_calling_config"]["mode"] = "ANY"
+                            tool_config["function_calling_config"]["allowed_function_names"] = [fn_name]
                 payload.update({
                     "tools": [{
                         "function_declarations": processed_tools
                     }],
-                    "tool_config": {
-                        "function_calling_config": {
-                            "mode": "AUTO"
-                        }
-                    }
+                    "tool_config": tool_config,
                 })
             elif field == "temperature":
                 generation_config["temperature"] = value
-            elif field == "max_tokens":
+            elif field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
                 if value > 65535:
                     value = 65535
                 generation_config["max_output_tokens"] = value
@@ -680,8 +713,14 @@ async def get_vertex_gemini_payload(request, engine, provider, api_key=None):
                 payload[field] = value
 
     payload.setdefault("generationConfig", {}).update(generation_config)
+    stop_value = getattr(request, "stop", None)
+    if stop_value:
+        if isinstance(stop_value, str):
+            payload["generationConfig"]["stopSequences"] = [stop_value]
+        elif isinstance(stop_value, list):
+            payload["generationConfig"]["stopSequences"] = [str(x) for x in stop_value if x is not None]
     if "max_output_tokens" not in generation_config:
-        payload["generationConfig"]["max_output_tokens"] = 32768
+        payload["generationConfig"]["max_output_tokens"] = 65535 if any(m in original_model for m in gemini_max_token_65k_models) else 32768
 
     if "gemini-2.5" in original_model:
         # 从请求模型名中检测思考预算设置
@@ -815,7 +854,7 @@ async def get_vertex_claude_payload(request, engine, provider, api_key=None):
         elif tool_call_id:
             messages.append({"role": "user", "content": [{
                 "type": "tool_result",
-                "tool_use_id": tool_id,
+                "tool_use_id": tool_call_id,
                 "content": content
             }]})
         elif msg.role == "function":
@@ -913,7 +952,133 @@ async def get_vertex_claude_payload(request, engine, provider, api_key=None):
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
 
+    _normalize_vertex_claude_payload_in_place(payload, original_model, is_stream=bool(request.stream))
+
     return url, headers, payload
+
+
+_VERTEX_STRIP_BETA_PREFIXES = (
+    "oauth-",
+    "prompt-caching-scope-",
+    "claude-code-",
+)
+
+
+def filter_vertex_claude_beta_header(raw_beta: str) -> str:
+    """剥离发往 Vertex AI 的 anthropic-beta 中的私有/OAuth 标识，其余特性原样保留由客户端自行回退。"""
+    if not raw_beta or not isinstance(raw_beta, str):
+        return ""
+    kept = []
+    for seg in raw_beta.split(","):
+        s = seg.strip()
+        if s and not s.startswith(_VERTEX_STRIP_BETA_PREFIXES) and s not in kept:
+            kept.append(s)
+    return ",".join(kept)
+
+
+def _normalize_vertex_claude_payload_in_place(payload: dict, original_model: str, *, is_stream: bool) -> dict:
+    """清理并规范化发往 Vertex Claude 的请求体（兼容透传与转换模式）。"""
+    if not isinstance(payload, dict):
+        return payload
+    inbound_ver = str(payload.pop("_inbound_anthropic_version", None) or "").strip()
+    if inbound_ver:
+        payload["anthropic_version"] = "vertex-2023-10-16" if inbound_ver == "2023-06-01" else inbound_ver
+    else:
+        existing_ver = str(payload.get("anthropic_version") or "").strip()
+        if existing_ver and existing_ver != "2023-06-01":
+            payload["anthropic_version"] = existing_ver
+        else:
+            payload["anthropic_version"] = "vertex-2023-10-16"
+    payload.pop("model", None)
+    if isinstance(payload.get("anthropic_beta"), list):
+        kept_betas = [
+            b.strip() for b in payload["anthropic_beta"]
+            if isinstance(b, str) and b.strip() and not b.strip().startswith(_VERTEX_STRIP_BETA_PREFIXES)
+        ]
+        if kept_betas:
+            payload["anthropic_beta"] = kept_betas
+        else:
+            payload.pop("anthropic_beta", None)
+    if is_stream:
+        payload["stream"] = True
+    else:
+        payload.pop("stream", None)
+
+    # Claude 4.x / 5.x on Vertex 要求 thinking.type = "adaptive" + output_config.effort（拒绝 thinking.type = "enabled"）
+    thinking = payload.get("thinking")
+    model_l = str(original_model or "").lower()
+    if isinstance(thinking, dict) and thinking.get("type") == "enabled" and "claude-3" not in model_l:
+        budget = thinking.get("budget_tokens")
+        effort = "max"
+        if isinstance(budget, (int, float)):
+            if budget <= 2048:
+                effort = "low"
+            elif budget <= 8192:
+                effort = "medium"
+            elif budget <= 24576:
+                effort = "high"
+            else:
+                effort = "max"
+        new_thinking: dict = {"type": "adaptive"}
+        if "display" in thinking:
+            new_thinking["display"] = thinking["display"]
+        payload["thinking"] = new_thinking
+        out_cfg = payload.get("output_config")
+        if not isinstance(out_cfg, dict):
+            out_cfg = {}
+            payload["output_config"] = out_cfg
+        out_cfg.setdefault("effort", effort)
+        payload.pop("top_p", None)
+        payload.pop("top_k", None)
+        payload.pop("temperature", None)
+
+    # Claude 4.7 / 4.8 / 5.x 系列已废弃 temperature / top_p / top_k，传入会报 400
+    if any(k in model_l for k in ("-5", "4-7", "4-8", "4.7", "4.8")):
+        payload.pop("temperature", None)
+        payload.pop("top_p", None)
+        payload.pop("top_k", None)
+    return payload
+
+
+async def get_vertex_claude_passthrough_meta(request, engine, provider, api_key=None):
+    """Vertex Claude 原生 Anthropic /v1/messages 透传元数据适配器。"""
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if api_key and not (provider.get("client_email") and provider.get("private_key")):
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif provider.get("client_email") and provider.get("private_key"):
+        access_token = await get_access_token(provider["client_email"], provider["private_key"])
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    project_id = _get_vertex_project_id(provider)
+    model_dict = get_model_dict(provider)
+    original_model = model_dict[request.model]
+    location = gemini_preview  # global
+    vertex_base_url = provider.get("base_url", "https://aiplatform.googleapis.com/v1").rstrip("/")
+    action = "streamRawPredict" if request.stream else "rawPredict"
+    loc = await location.next()
+    url = f"{vertex_base_url}/projects/{project_id}/locations/{loc}/publishers/anthropic/models/{original_model}:{action}"
+    return url, headers, None
+
+
+async def patch_passthrough_vertex_claude_payload(
+    payload: dict,
+    modifications: dict,
+    request,
+    engine: str,
+    provider: dict,
+    api_key=None,
+) -> dict:
+    """透传模式下将 Anthropic /v1/messages 请求体转换为 Vertex Claude 兼容格式。"""
+    from .claude_channel import patch_passthrough_claude_payload
+    payload = await patch_passthrough_claude_payload(payload, modifications, request, engine, provider, api_key)
+    model_dict = get_model_dict(provider)
+    original_model = model_dict.get(request.model, request.model)
+    if is_tools_disabled(provider):
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+    return _normalize_vertex_claude_payload_in_place(payload, original_model, is_stream=bool(request.stream))
 
 
 async def fetch_vertex_gemini_response(client, url, headers, payload, model, timeout):
@@ -1013,7 +1178,9 @@ async def fetch_vertex_claude_response_stream(client, url, headers, payload, mod
         need_function_call = False
         is_finish = False
         promptTokenCount = 0
+        toolUsePromptTokenCount = 0
         candidatesTokenCount = 0
+        thoughtsTokenCount = 0
         totalTokenCount = 0
         # Vertex 流式响应可能出现 Gemini 风格 cachedContentTokenCount，需跨 JSON 片段暂存到最终 usage chunk。
         cachedContentTokenCount = 0
@@ -1025,9 +1192,15 @@ async def fetch_vertex_claude_response_stream(client, url, headers, payload, mod
                 if is_finish and '\"promptTokenCount\": ' in line:
                     json_data = parse_json_safely( "{" + line + "}")
                     promptTokenCount = json_data.get('promptTokenCount', 0)
+                if is_finish and '\"toolUsePromptTokenCount\": ' in line:
+                    json_data = parse_json_safely( "{" + line + "}")
+                    toolUsePromptTokenCount = json_data.get('toolUsePromptTokenCount', 0)
                 if is_finish and '\"candidatesTokenCount\": ' in line:
                     json_data = parse_json_safely( "{" + line + "}")
                     candidatesTokenCount = json_data.get('candidatesTokenCount', 0)
+                if is_finish and '\"thoughtsTokenCount\": ' in line:
+                    json_data = parse_json_safely( "{" + line + "}")
+                    thoughtsTokenCount = json_data.get('thoughtsTokenCount', 0)
                 if is_finish and '\"totalTokenCount\": ' in line:
                     json_data = parse_json_safely( "{" + line + "}")
                     totalTokenCount = json_data.get('totalTokenCount', 0)
@@ -1078,6 +1251,8 @@ async def fetch_vertex_claude_response_stream(client, url, headers, payload, mod
                 )
                 yield sse_string
 
+        promptTokenCount = (promptTokenCount or 0) + (toolUsePromptTokenCount or 0)
+        candidatesTokenCount = (candidatesTokenCount or 0) + (thoughtsTokenCount or 0)
         merge_usage(
             prompt_tokens=promptTokenCount,
             completion_tokens=candidatesTokenCount,
@@ -1202,6 +1377,58 @@ async def fetch_vertex_claude_models(client, provider):
     return models
 
 
+async def get_vertex_gemini_passthrough_meta(request, engine, provider, api_key=None):
+    """Vertex Gemini 原生 /v1beta 透传轻量元数据适配器（仅构建 URL 与认证头）。"""
+    if isinstance(api_key, str) and api_key.strip().startswith("AIza"):
+        raise ValueError("AI Studio API Key (AIza...) is not supported in vertex-gemini channel")
+    headers = {"Content-Type": "application/json"}
+    is_express = _is_vertex_express_key(api_key)
+    if api_key and not is_express and not (provider.get("client_email") and provider.get("private_key")):
+        headers["Authorization"] = f"Bearer {api_key}"
+    elif provider.get("client_email") and provider.get("private_key"):
+        access_token = await get_access_token(provider["client_email"], provider["private_key"])
+        headers["Authorization"] = f"Bearer {access_token}"
+    project_id = _get_vertex_project_id(provider)
+    gemini_stream = "streamGenerateContent" if request.stream else "generateContent"
+    model_dict = get_model_dict(provider)
+    original_model = model_dict.get(request.model, request.model)
+    location = gemini_preview
+    vertex_base_url = provider.get("base_url", "https://aiplatform.googleapis.com/v1beta").rstrip("/")
+    if vertex_base_url.endswith("#"):
+        url = vertex_base_url[:-1].rstrip("/")
+    elif is_express:
+        headers.pop("Authorization", None)
+        exp_pid, actual_key = await extract_vertex_express_project_id(api_key, vertex_base_url)
+        effective_pid = project_id or exp_pid
+        sse_suffix = "&alt=sse" if request.stream else ""
+        if effective_pid:
+            url = f"{vertex_base_url}/projects/{effective_pid}/locations/global/publishers/google/models/{original_model}:{gemini_stream}?key={actual_key}{sse_suffix}"
+        else:
+            url = f"{vertex_base_url}/publishers/google/models/{original_model}:{gemini_stream}?key={actual_key}{sse_suffix}"
+    else:
+        loc_val = await location.next()
+        url = f"{vertex_base_url}/projects/{project_id}/locations/{loc_val}/publishers/google/models/{original_model}:{gemini_stream}"
+    return url, headers, None
+
+
+async def patch_passthrough_vertex_gemini_payload(
+    payload: dict,
+    modifications: dict,
+    request,
+    engine: str,
+    provider: dict,
+    api_key=None,
+) -> dict:
+    """透传模式下对发往 Vertex Gemini 的 payload 做修饰，并自动补齐缺失的 contents[].role。"""
+    from .gemini_channel import patch_passthrough_gemini_payload
+    payload = await patch_passthrough_gemini_payload(payload, modifications, request, engine, provider, api_key)
+    if isinstance(payload, dict) and isinstance(payload.get("contents"), list):
+        for item in payload["contents"]:
+            if isinstance(item, dict) and not item.get("role"):
+                item["role"] = "user"
+    return payload
+
+
 def register():
     """注册 Vertex AI 渠道到注册中心"""
     from .registry import register_channel
@@ -1209,7 +1436,6 @@ def register():
     from .gemini_channel import gemini_stream_classifier
     
     # 注册 Vertex Gemini
-    from .gemini_channel import patch_passthrough_gemini_payload
     register_channel(
         id="vertex-gemini",
         type_name="vertex-gemini",
@@ -1217,10 +1443,8 @@ def register():
         auth_header="Authorization: Bearer {access_token}",
         description="Google Vertex AI (Gemini)",
         request_adapter=get_vertex_gemini_payload,
-        # 修改原因：Gemini 原生请求透传至 vertex-gemini 时需要渠道级 payload 修饰器。
-        # 修改方式：复用 gemini_channel 的 patch_passthrough_gemini_payload（仅注入 system_prompt），Vertex 格式兼容。
-        # 目的：透传时仍能应用渠道配置的 system_prompt。
-        passthrough_payload_adapter=patch_passthrough_gemini_payload,
+        passthrough_adapter=get_vertex_gemini_passthrough_meta,
+        passthrough_payload_adapter=patch_passthrough_vertex_gemini_payload,
         # 修改原因：vertex-gemini 接受 Gemini 原生格式，透传兼容性应由渠道自身声明。
         # 修改方式：声明 passthrough_dialects=["gemini"]，detect_passthrough 优先检查此字段。
         # 目的：Gemini 方言入口的请求发往 vertex-gemini 时走透传，避免双重转换。
@@ -1247,6 +1471,9 @@ def register():
         auth_header="Authorization: Bearer {access_token}",
         description="Google Vertex AI (Claude)",
         request_adapter=get_vertex_claude_payload,
+        passthrough_adapter=get_vertex_claude_passthrough_meta,
+        passthrough_payload_adapter=patch_passthrough_vertex_claude_payload,
+        passthrough_dialects=["claude"],
         response_adapter=fetch_vertex_claude_response,
         # 修改原因：Vertex Claude streamRawPredict 返回标准 Anthropic SSE，不是 Vertex Gemini 的逐行 JSON 流。
         # 修改方式：注册时直接复用 claude_channel.fetch_claude_response_stream；旧函数保留但不再作为适配器使用。

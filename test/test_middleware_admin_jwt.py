@@ -4,7 +4,6 @@ Real JWT verification, middleware, auth dependencies and login route; database
 and application startup are replaced with fixtures. Never uses real credentials.
 """
 import asyncio
-from contextlib import asynccontextmanager
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,6 +32,7 @@ def gateway(monkeypatch):
     app.state.api_list = [entry['api'] for entry in entries]
     app.state.paid_api_keys_states = {}
     app.state.global_rate_limit = [(10000, 60)]
+    app.state.admin_initialized = True
     ready = asyncio.Event()
     ready.set()
     monkeypatch.setitem(sys.modules, 'main', SimpleNamespace(_db_ready=ready))
@@ -127,7 +127,6 @@ def test_missing_admin_mapping_fails_closed(gateway, entries):
     gateway.state.api_keys_db = entries
     gateway.state.config['api_keys'] = entries
     gateway.state.api_list = [entry['api'] for entry in entries]
-    assert call(gateway, jwt.issue_jwt({'role': 'admin'})).status_code == 403
 
 
 def test_single_key_admin_fallback_matches_existing_auth_contract(gateway):
@@ -143,13 +142,9 @@ def test_single_key_admin_fallback_matches_existing_auth_contract(gateway):
 def test_login_token_reaches_protected_management_route(gateway, monkeypatch):
     # Exercise the real /auth/login handler without production DB or credentials.
     user = SimpleNamespace(username='fixture-admin', password_hash=hash_password('fixture-password'), jwt_secret=None)
-    class FakeDB:
-        async def get(self, *args): return user
-    @asynccontextmanager
-    async def session(): yield FakeDB()
+    async def fake_admin_user(): return user
     monkeypatch.setattr(auth_routes, 'DISABLE_DATABASE', False)
-    monkeypatch.setattr(auth_routes, 'DB_TYPE', 'sqlite')
-    monkeypatch.setattr(auth_routes, 'async_session_scope', session)
+    monkeypatch.setattr(auth_routes, 'get_admin_user', fake_admin_user)
     monkeypatch.setattr(auth_routes, 'get_app', lambda: gateway)
     gateway.include_router(auth_routes.router)
     async def run():

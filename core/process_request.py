@@ -27,8 +27,9 @@ from core.response import fetch_response, fetch_response_stream
 from core.streaming import LoggingStreamingResponse
 from core.stream_errors import reset_stream_state, UpstreamStreamError, extract_stream_error
 from core.byok import get_byok_real_key, is_byok_provider
-from core.utils import get_engine, is_local_api_key, provider_api_circular_list
-from utils import apply_custom_headers, error_handling_wrapper, safe_get
+from core.utils import get_engine, get_model_dict, is_local_api_key, provider_api_circular_list
+from core.stream_pipeline import error_handling_wrapper
+from utils import apply_custom_headers, safe_get
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -54,6 +55,7 @@ async def process_request(
     api_key_info: Optional[Dict[str, Any]] = None,
     key_enabled_plugins: Optional[List[str]] = None,
     dialect_id: Optional[str] = None,
+    stream_header_timeout: Optional[float] = None,
 ) -> Response:
     """
     向单个 provider 发送请求并处理响应
@@ -82,7 +84,7 @@ async def process_request(
     from core.handler import _fire_and_forget_channel_stats, _resolve_oauth_api_key, is_debug
 
     timeout_value = int(timeout_value)
-    model_dict = provider["_model_dict_cache"]
+    model_dict = get_model_dict(provider)
     original_model = model_dict[request.model]
     
     channel_id = f"{provider['provider']}"
@@ -193,7 +195,7 @@ async def process_request(
             # 修改方式：索引匹配始终使用 original_api_key，也就是配置中的 key_id。
             # 目的：避免 token 明文进入统计索引逻辑，并保持自动冷却定位正确。
             circular_list = provider_api_circular_list.get(provider['provider'])
-            if circular_list and hasattr(circular_list, 'items'):
+            if circular_list:
                 api_keys_list = circular_list.items
                 if original_api_key in api_keys_list:
                     current_info["provider_key_index"] = api_keys_list.index(original_api_key)
@@ -248,6 +250,7 @@ async def process_request(
                 wrapped_generator, first_response_time = await error_handling_wrapper(
                     generator, channel_id, engine, True,
                     app.state.error_triggers, keepalive_interval=keepalive_interval,
+                    stream_header_timeout=stream_header_timeout,
                     last_message_role=last_message_role,
                     request_url=url,
                     app=app,

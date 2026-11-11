@@ -3,7 +3,6 @@ import asyncio
 from pathlib import Path
 import re
 import tomllib
-from unittest.mock import patch
 
 from core import file_utils
 
@@ -44,20 +43,24 @@ def test_certifi_dependency_floor_and_lock_are_consistent():
 
 def test_shared_fetch_client_verifies_tls_and_is_closed(monkeypatch):
     # No network or application startup: only construct the HTTPX client.
+    import ssl
+    from core.public_fetch import PublicURLTransport
+
     monkeypatch.setattr(file_utils, "_shared_fetch_client", None)
     monkeypatch.setattr(file_utils, "_shared_fetch_client_lock", asyncio.Lock())
-    transport_factory = file_utils.httpx.AsyncHTTPTransport
 
     async def check_client():
-        with patch.object(file_utils.httpx, "AsyncHTTPTransport", wraps=transport_factory) as factory:
-            try:
-                client = await file_utils._get_shared_fetch_client()
-                assert factory.call_args.kwargs["verify"] is True
-                assert await file_utils._get_shared_fetch_client() is client
-                factory.assert_called_once()
-            finally:
-                await file_utils.close_shared_fetch_client()
-            assert client.is_closed
-            assert file_utils._shared_fetch_client is None
+        try:
+            client = await file_utils._get_shared_fetch_client()
+            transport = client._transport
+            assert isinstance(transport, PublicURLTransport)
+            ssl_context = transport._pool._ssl_context
+            assert ssl_context.verify_mode == ssl.CERT_REQUIRED
+            assert ssl_context.check_hostname is True
+            assert await file_utils._get_shared_fetch_client() is client
+        finally:
+            await file_utils.close_shared_fetch_client()
+        assert client.is_closed
+        assert file_utils._shared_fetch_client is None
 
     asyncio.run(check_client())

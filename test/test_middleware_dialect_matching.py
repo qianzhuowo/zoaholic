@@ -79,7 +79,7 @@ async def _run_middleware(path: str, headers: list, downstream_called: dict, sta
         if message["type"] == "http.response.start":
             statuses.append(message.get("status"))
 
-    fake_app = SimpleNamespace(state=SimpleNamespace(config={}))
+    fake_app = SimpleNamespace(state=SimpleNamespace(admin_initialized=True, config={}, api_list=['initialized-test-key']))
     middleware = StatsMiddleware(downstream, debug=False)
     scope = {
         "type": "http",

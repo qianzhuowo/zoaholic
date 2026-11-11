@@ -18,8 +18,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("backup", type=Path)
     parser.add_argument("--apply", action="store_true", help="Without this flag only checks preconditions")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1],
+                        help="Deployed project root (defaults to this checkout)")
     args = parser.parse_args()
-    root = Path("/opt/Zoaholic").resolve()
+    root = args.root.resolve()
     manifest = json.loads((args.backup / "file-deployment.json").read_text())
     for item in manifest:
         relative = item["path"]

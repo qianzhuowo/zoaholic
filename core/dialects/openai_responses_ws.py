@@ -58,37 +58,33 @@ def _get_client_ip(websocket: WebSocket) -> str:
 
 
 def _authenticate(websocket: WebSocket) -> tuple[Optional[int], Optional[str], Optional[str]]:
-    """WS 握手鉴权，复用 HTTP 路径同款逻辑。
+    """WS 握手鉴权，统一复用 HTTP 鉴权函数 authenticate_api_key_token。
 
-    返回 (api_index, token, error_msg)。error_msg 非空表示鉴权失败。
+    返回 (api_index, token_for_stats, error_msg)。error_msg 非空表示鉴权失败。
     """
     app = websocket.app
+    from fastapi import HTTPException
+    from core.auth import authenticate_api_key_token
     from core.middleware import get_api_key_from_headers
-    from core.auth import is_api_key_disabled
-    from core.ip_blacklist import is_global_ip_blocked, is_key_ip_blocked
 
     headers = [(k.lower().encode("latin-1"), v.encode("latin-1"))
                for k, v in websocket.headers.items()]
     token = get_api_key_from_headers(headers)
-    if not token:
-        return None, None, "Invalid or missing API Key"
+    client_ip = _get_client_ip(websocket)
+
+    try:
+        api_index = authenticate_api_key_token(app, token, client_ip, request=websocket)
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            msg = str((detail.get("error") or {}).get("message") or "IP is blocked")
+        else:
+            msg = str(detail or "Unauthorized")
+        return None, None, msg
 
     api_list = getattr(app.state, "api_list", [])
-    try:
-        api_index = api_list.index(token)
-    except ValueError:
-        return None, None, "Invalid or missing API Key"
-
-    if is_api_key_disabled(app, api_index):
-        return None, None, "API Key has been disabled"
-
-    client_ip = _get_client_ip(websocket)
-    if is_global_ip_blocked(app, client_ip):
-        return None, None, "IP is blocked"
-    if is_key_ip_blocked(app, api_index, client_ip):
-        return None, None, "IP is blocked"
-
-    return api_index, token, None
+    token_for_stats = api_list[api_index] if 0 <= api_index < len(api_list) else token
+    return api_index, token_for_stats, None
 
 
 # ==================== Chat Completions → Responses API 转换 ====================
@@ -370,6 +366,8 @@ async def _handle_response_create(websocket: WebSocket, payload: dict, api_index
         # 目的：_try_extract_usage 能通过 get_dialect 找到正确的 parse_usage，token 统计正常入库。
         "dialect_id": "openai-responses",
     }
+    from core.key_hierarchy import snapshot_key_ancestry
+    snapshot_key_ancestry(request_info_data, config['api_keys'][api_index])
     info_token = request_info.set(request_info_data)
     try:
         request_model = await parse_responses_request(payload, {}, {})
@@ -405,6 +403,13 @@ async def _handle_response_create(websocket: WebSocket, payload: dict, api_index
 @router.websocket("/v1/responses")
 async def responses_websocket(websocket: WebSocket) -> None:
     """Responses API WebSocket mode 端点，协议与 OpenAI 官方一致。"""
+    from fastapi import HTTPException
+    from core.initialization import ensure_initialized
+    try:
+        await ensure_initialized(websocket.app)
+    except HTTPException:
+        await websocket.close(code=1008, reason="Instance is not initialized")
+        return
     api_index, token, error_msg = _authenticate(websocket)
     if api_index is None:
         # 1008 Policy Violation：与官方 Codex 客户端对策略拒绝的处理一致
@@ -440,6 +445,11 @@ async def responses_websocket(websocket: WebSocket) -> None:
                 await _send_error_frame(websocket, 400, "missing required field: model")
                 continue
 
+            # A live connection must not retain an index across key reorder/disable/migration.
+            api_index, token, error_msg = _authenticate(websocket)
+            if api_index is None:
+                await websocket.close(code=1008, reason=error_msg or "Unauthorized")
+                return
             await _handle_response_create(websocket, payload, api_index, token, client_ip)
     except WebSocketDisconnect:
         pass

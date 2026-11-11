@@ -159,3 +159,24 @@ venv-*/
 /frontend/test/scratch/
 /core/test/local/
 /core/test/scratch/
+
+# Frontend tool caches
+frontend/.eslintcache
+.eslintcache
+
+# Ad-hoc API dump output from manual scripts
+safe_output/
+
+# Private keys / certificate bundles with secrets (public test fixtures live in tests/fixtures/)
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+
+# Local AI / agent tool state
+.claude/
+.cursor/
+.codex/
+.agents/

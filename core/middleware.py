@@ -10,6 +10,7 @@ import os
 import json
 
 from core.env import env_bool
+from core.initialization import ensure_initialized
 from core.json_utils import json_loads
 import uuid
 import asyncio
@@ -19,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pydantic import ValidationError
-from fastapi import Request, BackgroundTasks
+from fastapi import Request, BackgroundTasks, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Send, Scope, Message
@@ -203,6 +204,12 @@ class StatsMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            if scope["type"] == "websocket" and scope.get("app") is not None:
+                try:
+                    await ensure_initialized(scope["app"])
+                except HTTPException:
+                    await send({"type": "websocket.close", "code": 1008, "reason": "Instance is not initialized"})
+                    return
             await self.app(scope, receive, send)
             return
 
@@ -254,6 +261,13 @@ class StatsMiddleware:
 
         if not app:
             await self.app(scope, receive, send)
+            return
+
+        try:
+            await ensure_initialized(app)
+        except HTTPException as exc:
+            response = openai_error_response(str(exc.detail), exc.status_code)
+            await response(scope, receive, send)
             return
 
         start_time = time()
@@ -328,15 +342,14 @@ class StatsMiddleware:
                 # 修改原因：Key 级启用开关需要在中间件标准鉴权分支同样生效（方言前缀变动时的兜底路径）。
                 # 修改方式：与 core/auth.py 使用同一判定函数；admin JWT 豁免。
                 # 目的：禁用后所有入口一致拒绝。
+                from core.auth import check_key_ancestry_access
                 try:
-                    from core.auth import is_api_key_disabled
-                    if is_api_key_disabled(app, api_index) and not is_admin_jwt:
-                        response = openai_error_response("API Key has been disabled", 403)
-                        await response(scope, receive, send)
-                        reset_byok_context(byok_context_tokens)
-                        return
-                except Exception:
-                    pass
+                    check_key_ancestry_access(app, api_index, client_ip, admin_jwt=is_admin_jwt)
+                except HTTPException as exc:
+                    response = openai_error_response(exc.detail, exc.status_code)
+                    await response(scope, receive, send)
+                    reset_byok_context(byok_context_tokens)
+                    return
                 if is_key_ip_blocked(app, api_index, client_ip):
                     # 修改原因：标准 /v1 鉴权解析出当前 API Key 后，必须继续检查该 Key 自己的 IP 黑名单。
                     # 修改方式：用 api_index 匹配 app.state.api_key_ip_blacklists 中的预解析规则，命中即返回指定 403。
@@ -438,6 +451,9 @@ class StatsMiddleware:
             "raw_data_expires_at": None,
         }
 
+        if api_index is not None:
+            from core.key_hierarchy import snapshot_key_ancestry
+            snapshot_key_ancestry(request_info_data, config['api_keys'][api_index])
         current_request_info = request_info.set(request_info_data)
         on_request_start()
         response_completed = False

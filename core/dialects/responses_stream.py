@@ -141,6 +141,30 @@ class ResponsesStreamRenderer:
                 self.finish_reason = choice["finish_reason"]
         return events
 
+    def error_event(self, error) -> list[str]:
+        """没有进行中的 response 时的独立错误帧（Responses `error` 事件）。
+
+        用于响应头已发出后由 LoggingStreamingResponse 交付的流级错误；
+        response 生命周期内的错误由 finish(error=...) 以 response.failed 表达。
+        """
+        if self.terminal:
+            return []
+        self.terminal = True
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        return [self.event("error", message=error.get("message") or "Upstream stream failed",
+                           code=error.get("code") or error.get("type") or "server_error",
+                           param=error.get("param"))]
+
+    def render_frame(self, frame: str) -> list[str]:
+        """渲染一个完整的 Canonical SSE 帧（不含结尾空行）。"""
+        data = sse_frame_data(frame)
+        if not data:
+            return [frame + "\n\n"] if frame.startswith(":") else []
+        if data == "[DONE]":
+            return self.finish()
+        return self.feed(json.loads(data))
+
     def finish(self, *, error=None) -> list[str]:
         if self.terminal:
             return []
@@ -185,6 +209,45 @@ class ResponsesStreamRenderer:
         return events
 
 
+def sse_frame_data(frame: str) -> str:
+    return "\n".join(line[5:].lstrip(" ") for line in frame.splitlines() if line.startswith("data:"))
+
+
+class ResponsesChunkRenderer:
+    """方言 render_stream_factory 的逐块回调形式，每次流请求一个实例。
+
+        与 render_responses_iterator 共用 ResponsesStreamRenderer；尚未开始 response 时收到的
+    错误帧（如已提交 HTTP 200 后交付的延迟上游错误）渲染为独立 `error` 事件。
+    """
+
+    def __init__(self, model: str = ""):
+        self.renderer = ResponsesStreamRenderer(model)
+        self.buffer = ""
+
+    async def __call__(self, chunk: str) -> str:
+        self.buffer += chunk.replace("\r\n", "\n")
+        events = []
+        while "\n\n" in self.buffer:
+            frame, self.buffer = self.buffer.split("\n\n", 1)
+            events.extend(self._frame(frame))
+        return "".join(events)
+
+    def _frame(self, frame: str) -> list[str]:
+        data = sse_frame_data(frame)
+        try:
+            value = json.loads(data) if data and data != "[DONE]" else None
+        except ValueError:
+            return self.renderer.finish(error={"code": "upstream_stream_error",
+                                               "message": "Upstream stream contained invalid data"})
+        if isinstance(value, dict) and value.get("error") and not self.renderer.started:
+            return self.renderer.error_event(value["error"])
+        return self.renderer.render_frame(frame)
+
+
+def create_responses_stream_renderer() -> ResponsesChunkRenderer:
+    return ResponsesChunkRenderer()
+
+
 async def render_responses_iterator(source, model: str, *, stream: bool):
     if not stream:
         from .openai_responses import render_responses_response
@@ -200,15 +263,7 @@ async def render_responses_iterator(source, model: str, *, stream: bool):
     renderer = ResponsesStreamRenderer(model)
     decoder = codecs.getincrementaldecoder("utf-8")()
     buffer = ""
-
-    def frame_events(frame):
-        data = "\n".join(line[5:].lstrip(" ") for line in frame.splitlines()
-                         if line.startswith("data:"))
-        if not data:
-            return [frame + "\n\n"] if frame.startswith(":") else []
-        if data == "[DONE]":
-            return renderer.finish()
-        return renderer.feed(json.loads(data))
+    frame_events = renderer.render_frame
 
     try:
         async for value in source:

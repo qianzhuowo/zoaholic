@@ -19,6 +19,7 @@ def gateway(monkeypatch):
     app.state.api_list = ["test-key"]
     app.state.api_keys_db = [{"api": "test-key", "role": "user"}]
     app.state.config = {}
+    app.state.admin_initialized = True
     # 只隔离限流与上游调用，保留真实注册顺序、Gemini 解析和鉴权依赖。
     app.dependency_overrides[rate_limit_dependency] = lambda: None
     app.include_router(dialect_router)

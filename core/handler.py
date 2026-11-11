@@ -46,7 +46,7 @@ from core.models import (
     ModerationRequest,
     EmbeddingRequest,
 )
-from core.utils import get_engine, provider_api_circular_list, truncate_for_logging, is_local_api_key
+from core.utils import get_engine, get_model_dict, provider_api_circular_list, truncate_for_logging, is_local_api_key
 from core.routing import get_right_order_providers
 from core.byok import get_byok_real_key, get_byok_template_key, is_byok_provider
 from core.error_response import openai_error_response
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 # 默认超时时间（10分钟，支持长时间 reasoning 请求）
 # 默认超时时间（10分钟，支持长时间 reasoning 请求）
 DEFAULT_TIMEOUT = 600
+DEFAULT_STREAM_HEADER_TIMEOUT = 60
 
 # 调试模式标志
 is_debug = False
@@ -378,19 +379,9 @@ def _clone_request_data_for_channel_attempt(request_data: Any) -> Any:
         return request_data
 
 
-def _callable_accepts_keyword(func: Callable, keyword: str) -> bool:
-    """判断调用对象是否接受指定关键字参数。"""
-    # 修改原因：单元测试会用精简签名的 fake process_request 替换真实函数，新增 api_key_info/key_enabled_plugins 关键字会让旧测试替身报错。
-    # 修改方式：调用前检查签名；真实函数或带 **kwargs 的替身接收新参数，旧替身则跳过该关键字。
-    # 目的：保持生产路径可传递新出站上下文，同时不破坏既有测试和外部调用替身。
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
-        return True
-    return keyword in signature.parameters or any(
-        param.kind == inspect.Parameter.VAR_KEYWORD
-        for param in signature.parameters.values()
-    )
+    # 修改原因：测试需要能直接比较 RequestModel，或从最终请求中断言模型名与消息结构。
+    # 修改方式：移除已无调用的 _ callable 探测辅助函数，由调用方直接按真实签名传递关键字。
+    # 目的：消除生产路径中的每次 inspect.signature 反射。
 
 
 def normalize_keepalive_interval(keepalive_interval: Any, timeout_value: Any) -> Optional[int]:
@@ -415,6 +406,23 @@ def normalize_keepalive_interval(keepalive_interval: Any, timeout_value: Any) ->
         return None
 
     return interval
+
+
+def normalize_stream_header_timeout(header_timeout: Any, timeout_value: Any) -> Optional[float]:
+    """把流式响应头/首包超时规范化为正数秒数（支持 int/float，<=0 表示禁用）。"""
+    try:
+        ht = float(header_timeout)
+    except (TypeError, ValueError):
+        return None
+    if ht <= 0:
+        return None
+    try:
+        timeout = float(timeout_value)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    if timeout > 0 and ht > timeout:
+        return timeout
+    return int(ht) if ht.is_integer() else ht
 
 
 class ModelRequestHandler:
@@ -595,6 +603,11 @@ class ModelRequestHandler:
             # ── 正常路径：用户限速 + 全局路由 ──
             try:
                 final_api_key = self.app.state.api_list[api_index]
+                from core.middleware import request_info
+                from core.key_hierarchy import snapshot_key_ancestry
+                info = request_info.get()
+                if info is not None:
+                    snapshot_key_ancestry(info, config['api_keys'][api_index])
                 # 修改原因：Phase 2 quota 需要在旧 user_api_keys_rate_limit 消耗前检查用户 key 的统一配额。
                 # 修改方式：仅对已配置 quota 的 final_api_key 调用 quota_registry.check，并传入当前模型与 request_info 中的 client_ip。
                 # 目的：让统一配额负责用户 key 的请求、token、cost、IP 维度控制，同时保留旧 next() 作为上游 key 限速层。
@@ -837,7 +850,7 @@ class ModelRequestHandler:
                 continue
 
             # 检查是否所有 API 密钥都被速率限制
-            model_dict = provider["_model_dict_cache"]
+            model_dict = get_model_dict(provider)
             original_model = model_dict[request_model_name]
             # 修改原因：provider_api_circular_list 改为普通 dict 后，读不存在的 provider 不应自动创建空列表。
             # 修改方式：先用 get 取得当前 provider 的循环列表，缺失时跳过限流耗尽检查。
@@ -867,7 +880,7 @@ class ModelRequestHandler:
                             if _provider_attempt_counts.get(gi_provider_name, 0) >= _provider_key_slots(gi_provider):
                                 continue
                             gi_circular_list = provider_api_circular_list.get(gi_provider_name)
-                            gi_model = gi_provider["_model_dict_cache"][request_model_name]
+                            gi_model = get_model_dict(gi_provider)[request_model_name]
                             if not gi_circular_list or not await gi_circular_list.is_all_rate_limited(gi_model):
                                 group_all_exhausted = False
                                 break
@@ -945,6 +958,49 @@ class ModelRequestHandler:
             if is_local_api_key(provider_name):
                 keepalive_interval = None
 
+            # 解析流式响应头/首包超时（支持全局与单渠道/模型覆盖，默认 60s，与 keepalive_interval 解耦）
+            stream_header_timeout = None
+            sh_table = getattr(self.app.state, "stream_header_timeouts", None)
+            prov_prefs = safe_get(provider, "preferences", default={}) or {}
+            global_prefs = safe_get(getattr(self.app.state, "config", None), "preferences", default={}) or {}
+            has_explicit_sh = any(
+                isinstance(d, dict) and (d.get("stream_header_timeout") is not None or d.get("header_timeout") is not None)
+                for d in (prov_prefs, global_prefs)
+            )
+            if sh_table is not None:
+                stream_header_timeout = get_preference(
+                    sh_table, provider_name, original_request_model, DEFAULT_STREAM_HEADER_TIMEOUT
+                )
+            elif has_explicit_sh:
+                raw_sh = (
+                    prov_prefs.get("stream_header_timeout")
+                    if prov_prefs.get("stream_header_timeout") is not None
+                    else prov_prefs.get("header_timeout")
+                )
+                if raw_sh is None:
+                    raw_sh = (
+                        global_prefs.get("stream_header_timeout")
+                        if global_prefs.get("stream_header_timeout") is not None
+                        else global_prefs.get("header_timeout")
+                    )
+                if isinstance(raw_sh, dict):
+                    stream_header_timeout = get_preference_value(raw_sh, request_model_name)
+                    if stream_header_timeout is None:
+                        stream_header_timeout = get_preference_value(raw_sh, original_model)
+                    if stream_header_timeout is None:
+                        stream_header_timeout = raw_sh.get("default", DEFAULT_STREAM_HEADER_TIMEOUT)
+                else:
+                    stream_header_timeout = raw_sh
+            stream_header_timeout = normalize_stream_header_timeout(stream_header_timeout, local_timeout_value)
+            if is_local_api_key(provider_name):
+                stream_header_timeout = None
+            try:
+                _cur_info_sh = self.request_info_getter()
+                if isinstance(_cur_info_sh, dict):
+                    _cur_info_sh["_stream_header_timeout"] = stream_header_timeout
+            except Exception:
+                pass
+
             try:
                 passthrough_ctx = None
                 if dialect_id and original_payload is not None and isinstance(attempt_request_data, RequestModel):
@@ -972,16 +1028,11 @@ class ModelRequestHandler:
                 effective_force_api_key = byok_real_key if (byok_real_key and is_byok_provider(provider)) else force_api_key
                 process_extra_kwargs: Dict[str, Any] = {
                     "force_api_key": effective_force_api_key,
+                    "api_key_info": _interceptor_api_key_info,
+                    "key_enabled_plugins": _key_enabled_plugins,
                 }
-                # 修改原因：响应出站阶段需要把 Key 信息传入真实 process_request，但测试替身可能不接受新增参数。
-                # 修改方式：仅当当前 process_fn 签名支持时才附加 api_key_info 和 key_enabled_plugins。
-                # 目的：在不破坏既有测试替身的同时，把生产请求所需上下文传给响应处理链。
-                if _callable_accepts_keyword(process_fn, "api_key_info"):
-                    process_extra_kwargs["api_key_info"] = _interceptor_api_key_info
-                if _callable_accepts_keyword(process_fn, "key_enabled_plugins"):
-                    process_extra_kwargs["key_enabled_plugins"] = _key_enabled_plugins
 
-                if process_fn is process_request and _callable_accepts_keyword(process_fn, "dialect_id"):
+                if process_fn is process_request:
                     process_extra_kwargs["dialect_id"] = dialect_id
                 if process_fn is process_request_passthrough:
                     response = await process_fn(
@@ -1040,8 +1091,13 @@ class ModelRequestHandler:
                 # 根据异常类型设置状态码和错误消息
                 if isinstance(e, httpx.ReadTimeout):
                     status_code = 504  # Gateway Timeout
-                    timeout_value = e.request.extensions.get('timeout', {}).get('read', -1)
-                    error_message = f"Request timed out after {timeout_value} seconds"
+                    _req_obj = getattr(e, "_request", None)
+                    timeout_value = (
+                        _req_obj.extensions.get("timeout", {}).get("read", -1)
+                        if _req_obj is not None and hasattr(_req_obj, "extensions")
+                        else (stream_header_timeout or local_timeout_value)
+                    )
+                    error_message = str(e) if "Stream header/first-byte timeout" in str(e) else f"Request timed out after {timeout_value} seconds"
                 elif isinstance(e, httpx.ConnectError):
                     status_code = 503  # Service Unavailable
                     error_message = "Unable to connect to service"
@@ -1193,6 +1249,24 @@ class ModelRequestHandler:
                                 current_api, duration=_duration, reason=_reason
                             )
                             key_rule_disabled_current = True
+                elif (
+                    not _rule_result
+                    and current_api
+                    and channel_circular_list
+                    and not is_current_byok_request
+                    and not key_rule_disabled_current
+                    and api_key_count_before_rule > 1
+                    and channel_circular_list.schedule_algorithm == "sticky_ip"
+                    and all(error not in error_message for error in exclude_error_rate_limit)
+                ):
+                    # sticky_ip 下若请求耗时超过秒级冷却且未命中显式 key_rule（如 504 首包超时），
+                    # 临时冷却当前失败 key 以确保下一次重试顺移借用下一把可用 key。
+                    _raw_cd = provider.get("preferences", {}).get("cooldown_period")
+                    _fallback_cd = max(int(_raw_cd if _raw_cd is not None else 3), 10)
+                    await channel_circular_list.set_auto_disabled(
+                        current_api, duration=_fallback_cd, reason=f"status={status_code}"
+                    )
+                    key_rule_disabled_current = True
 
                 # 仅统计"启用"的 key 数量，避免禁用 key 造成误判。
                 # 修改原因：旧逻辑先冷却渠道再冷却 key，会把同渠道剩余 key 从候选列表中埋没。
@@ -1337,7 +1411,7 @@ class ModelRequestHandler:
                                 if _provider_attempt_counts.get(gi_name, 0) >= _provider_key_slots(gi_provider):
                                     continue
                                 gi_circular_list = provider_api_circular_list.get(gi_name)
-                                gi_model = gi_provider["_model_dict_cache"][request_model_name]
+                                gi_model = get_model_dict(gi_provider)[request_model_name]
                                 if not gi_circular_list or not await gi_circular_list.is_all_rate_limited(gi_model):
                                     group_has_available = True
                                     break

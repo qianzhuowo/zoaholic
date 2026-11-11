@@ -369,6 +369,8 @@ class RequestStat(Base):
     provider = Column(_VARCHAR_INDEX, index=True)
     model = Column(_VARCHAR_INDEX, index=True)
     api_key = Column(_VARCHAR_INDEX, index=True)
+    api_key_id = Column(_VARCHAR_INDEX, nullable=True, index=True)
+    key_ancestor_ids = Column(Text, nullable=True)  # Request-time root-to-parent IDs, JSON array.
     success = Column(Boolean, default=False, index=True)  # 请求是否成功
     status_code = Column(Integer, nullable=True, index=True)  # HTTP 状态码
     is_flagged = Column(Boolean, default=False)
@@ -559,7 +561,7 @@ if not DISABLE_DATABASE:
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA busy_timeout = 30000;")  # 30 seconds
                 cursor.execute("PRAGMA synchronous = NORMAL;")  # Faster writes
-                cursor.execute("PRAGMA cache_size = -64000;")  # 64MB cache
+                cursor.execute("PRAGMA cache_size = -4000;")  # 4MB cache per connection
             except Exception as e:
                 logger.error(f"Failed to set PRAGMA for SQLite: {e}")
             finally:

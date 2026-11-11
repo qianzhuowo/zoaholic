@@ -9,6 +9,7 @@ except ModuleNotFoundError:
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from starlette.responses import Response
@@ -40,7 +41,7 @@ from core.error_response import create_error_response, openai_error_response
 
 from utils import safe_get, load_config
 
-from db import DISABLE_DATABASE, RequestStat, AdminUser, DB_TYPE, async_session_scope
+from db import DISABLE_DATABASE, RequestStat, DB_TYPE, async_session_scope
 from core.stats import (
     create_tables,
     update_paid_api_keys_states,
@@ -53,6 +54,7 @@ DEFAULT_TIMEOUT = int(os.getenv("TIMEOUT", 600))
 # 修改方式：为 keepalive_interval 提供可环境变量覆盖的合理默认值，配置文件仍可按全局/渠道/模型覆盖。
 # 目的：默认每 15 秒向下游发送 SSE 注释帧，避免客户端或中间代理因空闲无字节而断开。
 DEFAULT_KEEPALIVE_INTERVAL = int(os.getenv("KEEPALIVE_INTERVAL", 15))
+DEFAULT_STREAM_HEADER_TIMEOUT = int(os.getenv("STREAM_HEADER_TIMEOUT", 60))
 # DEBUG 环境变量支持 true/false/1/0/yes/no
 is_debug = env_bool("DEBUG", False)
 # API 文档（/docs /redoc /openapi.json /docs/markdown）默认关闭，需显式开启
@@ -68,33 +70,43 @@ except Exception:
     VERSION = 'unknown'
 logger.info("VERSION: %s", VERSION)
 
-def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT):
-    # 存储超时配置
-    # 修改原因：旧逻辑在 preferences 为空或未声明某项偏好时，会让 global 默认值变成空 dict，
-    # 后续调用方若传入兜底值就可能覆盖启动期 default_timeout（keepalive 因此默认落到 99999 并被禁用）。
-    # 修改方式：先写入 default_timeout，再叠加配置文件中的全局/模型级覆盖。
-    # 目的：让 model_timeout、keepalive_interval 等偏好都稳定遵守启动期默认值，同时保留现有覆盖语义。
+def init_preference(all_config, preference_key, default_timeout=DEFAULT_TIMEOUT, alias_keys=()):
+    # 存储超时配置（支持全局与单渠道覆盖，兼容直接填数值或按模型名的字典，以及别名键如 header_timeout）
     preference_dict = {"default": default_timeout}
     preferences = safe_get(all_config, "preferences", default={})
     providers = safe_get(all_config, "providers", default=[])
-    if preferences:
-        if isinstance(preferences.get(preference_key), int):
-            preference_dict["default"] = preferences.get(preference_key)
-        else:
-            preference_settings = preferences.get(preference_key, {}) or {}
-            for model_name, timeout_value in preference_settings.items():
+    keys_to_check = (preference_key,) + tuple(alias_keys or ())
+    if isinstance(preferences, dict) and preferences:
+        raw_global = None
+        for k in keys_to_check:
+            if preferences.get(k) is not None:
+                raw_global = preferences.get(k)
+                break
+        if isinstance(raw_global, (int, float)) and not isinstance(raw_global, bool):
+            preference_dict["default"] = raw_global
+        elif isinstance(raw_global, dict):
+            for model_name, timeout_value in raw_global.items():
                 preference_dict[model_name] = timeout_value
 
     result = defaultdict(lambda: defaultdict(lambda: default_timeout))
     for provider in providers:
-        provider_preference_settings = safe_get(provider, "preferences", preference_key, default={})
-        if provider_preference_settings:
-            for model_name, timeout_value in provider_preference_settings.items():
-                result[provider['provider']][model_name] = timeout_value
+        if not isinstance(provider, dict) or "provider" not in provider:
+            continue
+        prov_prefs = safe_get(provider, "preferences", default={})
+        if not isinstance(prov_prefs, dict):
+            continue
+        raw_prov = None
+        for k in keys_to_check:
+            if prov_prefs.get(k) is not None:
+                raw_prov = prov_prefs.get(k)
+                break
+        if isinstance(raw_prov, (int, float)) and not isinstance(raw_prov, bool):
+            result[provider["provider"]]["default"] = raw_prov
+        elif isinstance(raw_prov, dict):
+            for model_name, timeout_value in raw_prov.items():
+                result[provider["provider"]][model_name] = timeout_value
 
     result["global"] = preference_dict
-    # print("result", json.dumps(result, indent=4))
-
     return result
 
 # ---- 数据库压缩闸门 ----
@@ -395,8 +407,12 @@ async def cleanup_expired_raw_data():
                             if not db_path:
                                 db_path = "data/stats.db"
                             async with aiosqlite.connect(db_path) as vacuum_conn:
-                                # 每次回收最多 2000 页（约 8MB），轻量不阻塞
-                                await vacuum_conn.execute("PRAGMA incremental_vacuum(2000)")
+                                # 必须 fetchall() 消费游标，否则 SQLite 只会 step 1 页（4KB）就停下；
+                                # 每次最多回收 50000 页（约 200MB）并附带一次非阻塞 PASSIVE checkpoint。
+                                async with vacuum_conn.execute("PRAGMA incremental_vacuum(50000)") as cur:
+                                    await cur.fetchall()
+                                async with vacuum_conn.execute("PRAGMA wal_checkpoint(PASSIVE)") as cur:
+                                    await cur.fetchall()
                                 logger.info("SQLite incremental_vacuum completed after raw data cleanup")
                         except Exception as ve:
                             logger.warning(f"SQLite incremental_vacuum failed (non-critical): {ve}")
@@ -620,6 +636,8 @@ async def lifespan(app: FastAPI):
     set_handler_debug_mode(is_debug)
     app.state.version = VERSION
     app.state.started_at = datetime.now(timezone.utc)
+    app.state.admin_initialized = False
+    app.state.needs_setup = True
     app.state.startup_completed = False
     
     # 启动定时清理任务
@@ -635,25 +653,6 @@ async def lifespan(app: FastAPI):
             logger.exception("Database init failed during startup: %s", e)
             raise
 
-        # 确保 JWT_SECRET 在进程启动后就已确定（避免后端热更新/重启导致前端旧 JWT 立刻 403）
-        # 规则：若未显式设置环境变量 JWT_SECRET，则使用 DB 中持久化的 admin_user.jwt_secret。
-        try:
-            from core.jwt_utils import set_jwt_secret
-
-            if not (os.getenv("JWT_SECRET") or "").strip():
-                async with async_session_scope() as db:
-                    if (DB_TYPE or "sqlite").lower() == "d1":
-                        row = await db.query_one("SELECT jwt_secret FROM admin_user WHERE id = ?", [1])
-                        jwt_secret = row.get("jwt_secret") if row else None
-                    else:
-                        admin_user = await db.get(AdminUser, 1)
-                        jwt_secret = getattr(admin_user, "jwt_secret", None) if admin_user is not None else None
-
-                if jwt_secret:
-                    set_jwt_secret(str(jwt_secret))
-        except Exception as e:
-            logger.debug("JWT secret init skipped/failed: %s", e)
-
         cleanup_task = asyncio.create_task(cleanup_expired_raw_data())
         logger.info("Started raw data cleanup background task")
         if (DB_TYPE or "sqlite").lower() == "sqlite":
@@ -663,8 +662,6 @@ async def lifespan(app: FastAPI):
     if app and not hasattr(app.state, 'config'):
         # logger.warning("Config not found, attempting to reload")
         app.state.config, app.state.api_keys_db, app.state.api_list = await load_config(app)
-        # 用于前端判断是否需要进入初始化向导
-        app.state.needs_setup = not bool(app.state.api_list)
         # from ruamel.yaml.timestamp import TimeStamp
         # def json_default(obj):
         #     if isinstance(obj, TimeStamp):
@@ -705,6 +702,9 @@ async def lifespan(app: FastAPI):
 
         app.state.provider_timeouts = init_preference(app.state.config, "model_timeout", DEFAULT_TIMEOUT)
         app.state.keepalive_interval = init_preference(app.state.config, "keepalive_interval", DEFAULT_KEEPALIVE_INTERVAL)
+        app.state.stream_header_timeouts = init_preference(
+            app.state.config, "stream_header_timeout", DEFAULT_STREAM_HEADER_TIMEOUT, alias_keys=("header_timeout",)
+        )
         # 初始化 models_list（用于存储从其他 API Key 引用的模型列表）
         app.state.models_list = {}
         # pprint(dict(app.state.provider_timeouts))
@@ -728,6 +728,14 @@ async def lifespan(app: FastAPI):
             logger.info("Started logs retention cleanup background task")
         except Exception as e:
             logger.error(f"Failed to start logs retention cleanup task: {e}")
+
+    from core.initialization import refresh_initialization
+    try:
+        await refresh_initialization(app, force=True, repair_secret=True)
+    except Exception:
+        app.state.admin_initialized = False
+        app.state.needs_setup = True
+        logger.exception("Administrator initialization failed; protected APIs remain disabled")
 
     if app and not hasattr(app.state, 'client_manager'):
 
@@ -871,6 +879,15 @@ async def lifespan(app: FastAPI):
         import ctypes
         _libc = ctypes.CDLL("libc.so.6")
         _has_malloc_trim = hasattr(_libc, 'malloc_trim')
+        if _has_malloc_trim:
+            _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            _libc.malloc_trim.restype = ctypes.c_int
+        if hasattr(_libc, 'mallopt'):
+            _libc.mallopt.argtypes = [ctypes.c_int, ctypes.c_int]
+            _libc.mallopt.restype = ctypes.c_int
+            _libc.mallopt(-3, 131072)  # M_MMAP_THRESHOLD = 128 KB (disable dynamic 32MB bump)
+            _libc.mallopt(-1, 131072)  # M_TRIM_THRESHOLD = 128 KB
+            _libc.mallopt(-8, 2)       # M_ARENA_MAX = 2
     except Exception:
         _libc = None
         _has_malloc_trim = False
@@ -882,27 +899,32 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(300)  # 5 分钟
             tick += 1
 
+            # 当 RSS >= 450MB 或每 15 分钟（3 个 tick）或凌晨 4 点时，先做 gc.collect() 回收循环引用，再做 malloc_trim(0)
+            now = datetime.now(timezone(timedelta(hours=8)))  # CST
+            rss_mb = 0
+            try:
+                with open("/proc/self/statm", "r") as _sf:
+                    rss_mb = (int(_sf.read().split()[1]) * 4096) // (1024 * 1024)
+            except Exception:
+                pass
+            if rss_mb >= 450 or tick % 3 == 0 or (now.hour == 4 and now.minute < 5):
+                try:
+                    before = gc.get_count()
+                    collected = gc.collect()
+                    after = gc.get_count()
+                    if collected > 0 or (now.hour == 4 and now.minute < 5):
+                        logger.info(f"[memory_maintenance] gc.collect() done (rss={rss_mb}MB): freed {collected} objects, counts {before} -> {after}")
+                except Exception as e:
+                    logger.warning(f"[memory_maintenance] gc.collect() failed: {e}")
+
             # malloc_trim 每轮都做
             if _has_malloc_trim:
                 try:
                     _libc.malloc_trim(0)
                     if tick % 12 == 1:  # 每小时日志一次
-                        logger.info("[memory_maintenance] malloc_trim(0) executed")
+                        logger.info(f"[memory_maintenance] malloc_trim(0) executed (rss={rss_mb}MB)")
                 except Exception as e:
                     logger.warning(f"[memory_maintenance] malloc_trim failed: {e}")
-
-            # 凌晨 4 点做一次 gen2 GC
-            now = datetime.now(timezone(timedelta(hours=8)))  # CST
-            if now.hour == 4 and now.minute < 5:
-                try:
-                    before = gc.get_count()
-                    collected = gc.collect()
-                    after = gc.get_count()
-                    logger.info(f"[memory_maintenance] gen2 collect done: freed {collected} objects, counts {before} -> {after}")
-                    if _has_malloc_trim:
-                        _libc.malloc_trim(0)
-                except Exception as e:
-                    logger.warning(f"[memory_maintenance] gc.collect() failed: {e}")
 
     asyncio.get_running_loop().create_task(memory_maintenance())
 
@@ -1111,22 +1133,45 @@ model_handler: Optional[ModelRequestHandler] = None
 # SPA 前端路由 fallback - 所有未匹配的前端路由都返回 index.html
 from fastapi.responses import FileResponse
 
-# 修改原因：Key Analytics 是前端独立路由，直接刷新页面时也应返回 SPA index.html。
-# 修改方式：把 /key-analytics 加入服务端 fallback 白名单。
-# 目的：避免浏览器刷新新增页面时落到静态文件 404。
+STATIC_ROOT = Path("./static").resolve()
 SPA_ROUTES = ["/channels", "/playground", "/admin", "/settings", "/logs", "/login"]
-
-# 缓存控制头：index.html 不缓存，静态资源（带 hash）长期缓存
 HTML_NO_CACHE_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
-ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}  # 1 年
+ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+class CachedStaticFiles(StaticFiles):
+    """Keep PR #33's immutable asset caching with StaticFiles path/range handling."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 206, 304):
+            response.headers.update(ASSET_CACHE_HEADERS)
+        return response
+
+
+# Mount safe asset handlers before the fallback, without losing cache headers.
+for asset_directory in ("assets", "icons"):
+    directory = STATIC_ROOT / asset_directory
+    if directory.is_dir() and directory.resolve().is_relative_to(STATIC_ROOT):
+        handler = CachedStaticFiles if asset_directory == "assets" else StaticFiles
+        app.mount(f"/{asset_directory}", handler(directory=directory), name=asset_directory)
+
 
 @app.get("/{path:path}")
 async def spa_fallback(path: str):
-    index_html = "./static/index.html"
+    if path.startswith("/") or "\\" in path or "\x00" in path or ".." in path.split("/"):
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        static_file = (STATIC_ROOT / path).resolve()
+        index_html = (STATIC_ROOT / "index.html").resolve()
+        if not static_file.is_relative_to(STATIC_ROOT) or not index_html.is_relative_to(STATIC_ROOT):
+            raise ValueError("Path escapes static root")
+    except (OSError, RuntimeError, ValueError):
+        raise HTTPException(status_code=404, detail="Not found") from None
 
     # 检查是否是前端 SPA 路由
     if path == "" or any(path.startswith(route.lstrip("/")) for route in SPA_ROUTES):
-        if os.path.isfile(index_html):
+        if index_html.is_file():
             return FileResponse(index_html, headers=HTML_NO_CACHE_HEADERS)
         # 未构建前端时，不要 500；提示用户如何生成
         return JSONResponse(
@@ -1137,15 +1182,16 @@ async def spa_fallback(path: str):
         )
 
     # 尝试返回静态文件
-    static_file = f"./static/{path}"
-    if os.path.isfile(static_file):
-        # 带 hash 的静态资源可以长期缓存
+    if static_file.is_file():
+        if static_file.suffix == ".html":
+            return FileResponse(static_file, headers=HTML_NO_CACHE_HEADERS)
+        # 保留 PR 的其他前端资源缓存行为。
         if "/assets/" in path or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf")):
             return FileResponse(static_file, headers=ASSET_CACHE_HEADERS)
         return FileResponse(static_file)
 
     # 默认返回 index.html（若存在）
-    if os.path.isfile(index_html):
+    if index_html.is_file():
         return FileResponse(index_html, headers=HTML_NO_CACHE_HEADERS)
 
     return JSONResponse(
@@ -1154,14 +1200,6 @@ async def spa_fallback(path: str):
             "detail": "Frontend is not built.",
         },
     )
-
-# 添加静态文件挂载（用于 assets、icons 等静态资源）
-# 注意：当仅提交源代码且未构建前端时，static 目录可能只有 .gitkeep。
-# 因此这里只在目录存在时才挂载，避免启动时报错。
-if os.path.isdir("./static/assets"):
-    app.mount("/assets", StaticFiles(directory="./static/assets"), name="assets")
-if os.path.isdir("./static/icons"):
-    app.mount("/icons", StaticFiles(directory="./static/icons"), name="icons")
 
 if __name__ == '__main__':
     import uvicorn
