@@ -316,15 +316,21 @@ async def process_request(
                         )
                 else:
                     # force_non_stream：上游非流式 → 拆成 SSE 返回客户端
-                    from .stream_convert import convert_json_to_sse
-                    first_element = await anext(wrapped_generator)
+                    from .stream_convert import convert_json_to_sse, parse_json_body
+                    chunks = [chunk async for chunk in wrapped_generator]
+                    try:
+                        complete_response = parse_json_body(chunks)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=502, detail=f"Upstream returned an invalid JSON response: {exc}")
+                    finally:
+                        chunks.clear()
+                    error = extract_stream_error(complete_response)
+                    if error:
+                        raise UpstreamStreamError(error)
 
                     async def force_non_stream_iter():
-                        if isinstance(first_element, dict):
-                            async for sse_chunk in convert_json_to_sse(first_element, original_model):
-                                yield sse_chunk
-                        else:
-                            yield first_element
+                        async for sse_chunk in convert_json_to_sse(complete_response, original_model):
+                            yield sse_chunk
 
                     response = LoggingStreamingResponse(
                         force_non_stream_iter(),

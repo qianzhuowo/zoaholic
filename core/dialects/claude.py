@@ -8,12 +8,15 @@ Claude 方言
 - endpoints: 自动注册的端点定义
 """
 
+import copy
 import json
 import asyncio
 from typing import Any, Dict, List, Optional, Union
 
 from core.json_utils import json_loads, json_dumps_text
 from core.models import RequestModel, Message, ContentItem
+from core.stream_convert import encode_sse, iter_sse_events
+from core.stream_errors import extract_stream_error
 from core.usage import extract_cache_usage
 
 from .registry import DialectDefinition, EndpointDefinition, register_dialect
@@ -661,6 +664,132 @@ def parse_claude_usage(data: Any) -> Optional[Dict[str, int]]:
     return None
 
 
+# ============================================================
+# 透传 stream_mode：Claude 原生流式 <-> 非流式
+# ============================================================
+
+# content_block_start 时 input 为空、随后通过 input_json_delta 流出的块类型
+_CLAUDE_STREAMED_INPUT_BLOCKS = ("tool_use", "server_tool_use", "mcp_tool_use")
+
+
+async def assemble_claude_stream(stream_generator) -> Dict[str, Any]:
+    """Claude 原生 SSE -> Claude 原生 Message JSON（force_stream 透传）。"""
+    message: Dict[str, Any] = {}
+    blocks: Dict[int, Dict[str, Any]] = {}
+    partial_json: Dict[int, str] = {}
+
+    async for event_type, data in iter_sse_events(stream_generator):
+        if not isinstance(data, dict):
+            continue
+        kind = data.get("type") or event_type
+        if kind == "error" or extract_stream_error(data):
+            return data
+        if kind == "message_start":
+            message = copy.deepcopy(data.get("message") or {})
+        elif kind == "content_block_start":
+            blocks[data.get("index", len(blocks))] = copy.deepcopy(data.get("content_block") or {})
+        elif kind == "content_block_delta":
+            index = data.get("index", 0)
+            block = blocks.setdefault(index, {})
+            delta = data.get("delta") or {}
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                block["text"] = block.get("text", "") + delta.get("text", "")
+            elif delta_type == "input_json_delta":
+                partial_json[index] = partial_json.get(index, "") + delta.get("partial_json", "")
+            elif delta_type == "thinking_delta":
+                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
+            elif delta_type == "signature_delta":
+                block["signature"] = block.get("signature", "") + delta.get("signature", "")
+            elif delta_type == "citations_delta":
+                block.setdefault("citations", []).append(delta.get("citation"))
+        elif kind == "message_delta":
+            message.update(data.get("delta") or {})
+            usage = data.get("usage")
+            if isinstance(usage, dict):
+                merged = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                merged.update({k: v for k, v in usage.items() if v is not None})
+                message["usage"] = merged
+
+    if not message:
+        return {"type": "error", "error": {"type": "api_error",
+                                           "message": "Claude stream ended without message_start"}}
+
+    for index, raw in partial_json.items():
+        try:
+            blocks[index]["input"] = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            if message.get("stop_reason") == "max_tokens":
+                # 被截断的工具参数无法还原为对象，保留工具块本身
+                blocks[index]["input"] = {}
+                continue
+            return {"type": "error", "error": {"type": "api_error",
+                                               "message": f"Claude stream returned invalid tool input JSON at block {index}"}}
+    message["content"] = [blocks[i] for i in sorted(blocks)]
+    return message
+
+
+def _claude_block_events(index: int, block: Dict[str, Any]):
+    def event(kind: str, **fields) -> str:
+        return encode_sse({"type": kind, "index": index, **fields}, kind)
+
+    block_type = block.get("type")
+    if block_type == "text":
+        start = {k: v for k, v in block.items() if k != "citations"}
+        start["text"] = ""
+        yield event("content_block_start", content_block=start)
+        for citation in block.get("citations") or []:
+            yield event("content_block_delta", delta={"type": "citations_delta", "citation": citation})
+        if block.get("text"):
+            yield event("content_block_delta", delta={"type": "text_delta", "text": block["text"]})
+    elif block_type == "thinking":
+        yield event("content_block_start", content_block={**block, "thinking": "", "signature": ""})
+        if block.get("thinking"):
+            yield event("content_block_delta", delta={"type": "thinking_delta", "thinking": block["thinking"]})
+        if block.get("signature"):
+            yield event("content_block_delta", delta={"type": "signature_delta", "signature": block["signature"]})
+    elif block_type in _CLAUDE_STREAMED_INPUT_BLOCKS:
+        yield event("content_block_start", content_block={**block, "input": {}})
+        if block.get("input"):
+            yield event("content_block_delta", delta={
+                "type": "input_json_delta",
+                "partial_json": json.dumps(block["input"], ensure_ascii=False),
+            })
+    else:
+        # redacted_thinking、服务端工具结果等块在流式中也是整块下发
+        yield event("content_block_start", content_block=block)
+    yield event("content_block_stop")
+
+
+async def split_claude_response(response: Dict[str, Any], model: str = ""):
+    """Claude 原生 Message JSON -> Claude 原生 SSE（force_non_stream 透传）。"""
+    if not isinstance(response, dict):
+        raise TypeError(f"split_claude_response expects a dict, got {type(response).__name__}")
+    if response.get("type") == "error" or "error" in response:
+        yield encode_sse(response, "error")
+        return
+
+    usage = dict(response.get("usage") or {})
+    start = {k: v for k, v in response.items() if k not in ("content", "stop_reason", "stop_sequence", "usage")}
+    start.setdefault("type", "message")
+    start.setdefault("role", "assistant")
+    start.setdefault("model", model)
+    start.update(content=[], stop_reason=None, stop_sequence=None, usage={**usage, "output_tokens": 0})
+    yield encode_sse({"type": "message_start", "message": start}, "message_start")
+
+    for index, block in enumerate(response.get("content") or []):
+        if isinstance(block, dict):
+            for event in _claude_block_events(index, block):
+                yield event
+
+    yield encode_sse({
+        "type": "message_delta",
+        "delta": {"stop_reason": response.get("stop_reason"), "stop_sequence": response.get("stop_sequence")},
+        "usage": usage,
+    }, "message_delta")
+    yield encode_sse({"type": "message_stop"}, "message_stop")
+
+
 def register() -> None:
     """注册 Claude 方言"""
     register_dialect(
@@ -673,6 +802,8 @@ def register() -> None:
             render_stream=render_claude_stream,
             render_stream_factory=create_claude_stream_renderer,
             parse_usage=parse_claude_usage,
+            stream_to_response=assemble_claude_stream,
+            response_to_stream=split_claude_response,
             target_engine="claude",
             endpoints=[
                 # POST /v1/messages - Claude 消息接口

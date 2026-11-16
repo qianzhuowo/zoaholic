@@ -50,6 +50,15 @@ EndpointHandler = Callable[..., Awaitable[Any]]
 # 返回: {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
 ParseUsage = Callable[[Union[Dict[str, Any], str]], Optional[Dict[str, int]]]
 
+# StreamToResponse: native SSE 流 -> native 非流式 JSON
+# 透传 + stream_mode=force_stream（客户端非流、上游流式）时拼装响应。
+# 遇到上游错误事件时返回该错误信封，由调用方通过 extract_stream_error 识别。
+StreamToResponse = Callable[[AsyncIterator[Any]], Awaitable[Dict[str, Any]]]
+
+# ResponseToStream: (native 非流式 JSON, model) -> native SSE 字符串序列
+# 透传 + stream_mode=force_non_stream（客户端流式、上游非流）时拆分响应。
+ResponseToStream = Callable[[Dict[str, Any], str], AsyncIterator[str]]
+
 
 @dataclass
 class EndpointDefinition:
@@ -121,6 +130,10 @@ class DialectDefinition:
     sanitize_response: Optional[SanitizeResponse] = None
     extract_token: Optional[ExtractToken] = None
     parse_usage: Optional[ParseUsage] = None
+
+    # 同方言透传时的流式/非流式互转（stream_mode），输入输出均为该方言原生格式
+    stream_to_response: Optional[StreamToResponse] = None
+    response_to_stream: Optional[ResponseToStream] = None
 
     # 流式结构化 content 处理：
     # False（默认）= 自动将 delta.content list 拍扁为 markdown string（OAI/Claude 等不支持结构化图片的方言）

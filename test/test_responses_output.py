@@ -163,12 +163,7 @@ def test_process_request_output_integration(monkeypatch, stream, mode, dialect):
         yield wire(chunk(usage=canonical["usage"]))
         yield "data: [DONE]\n\n"
     async def wrapper(generator, *args, **kwargs):
-        # Real wrapper yields parsed dicts for non-stream responses.
-        if args[2] is False:
-            async def parsed():
-                async for v in generator:
-                    yield json.loads(v)
-            return parsed(), 0.01
+        # Real wrapper yields JSON text for non-stream responses (ensure_string as_sse=False).
         return generator, 0.01
     async def resolve(app, key, **kwargs):
         return key

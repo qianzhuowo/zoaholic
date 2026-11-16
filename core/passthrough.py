@@ -528,6 +528,58 @@ async def process_request_passthrough(
     if stream_override is not None:
         request.stream = stream_override
 
+    from core.dialects.registry import get_dialect
+    dialect = get_dialect(passthrough_ctx.dialect_id)
+
+    # ── 透传子路径后缀 ──
+    # passthrough_adapter 返回的 URL 对应方言的"主端点"（如 Claude 的 /messages）。
+    # 当入口请求是子路径（如 /v1/messages/count_tokens）时，需要追加路径后缀。
+    #
+    # 后缀从端点的 passthrough_root 显式配置计算，不依赖 adapter URL 的路径结构，
+    # 因此无论 base_url 配成什么样（如 https://proxy.com/anthropic/v1）都能正确工作。
+    passthrough_suffix = ""
+    if endpoint and dialect:
+        # 查找匹配当前 endpoint 的透传根路径（显式配置，不依赖路由模板字符串）
+        _root = None
+        for _ep in dialect.endpoints:
+            if _ep.passthrough_root and endpoint.startswith(_ep.passthrough_root):
+                if _root is None or len(_ep.passthrough_root) > len(_root):
+                    _root = _ep.passthrough_root
+        # 例如 root="/v1/messages", endpoint="/v1/messages/count_tokens" → suffix="/count_tokens"
+        if _root and len(endpoint) > len(_root):
+            passthrough_suffix = endpoint[len(_root):]
+
+    # ── stream_mode ──
+    # 子端点（count_tokens、compact 等）不是生成接口，没有流式形态，stream_mode 不适用。
+    if passthrough_suffix:
+        stream_mode = "auto"
+    client_wants_stream = bool(request.stream)
+    if stream_mode == "force_stream":
+        upstream_stream = True
+    elif stream_mode == "force_non_stream":
+        upstream_stream = False
+    else:
+        upstream_stream = client_wants_stream
+
+    # 客户端与上游形态不同时，由入口方言在其原生格式内完成流式/非流式互转。
+    stream_to_response = response_to_stream = None
+    if upstream_stream != client_wants_stream:
+        stream_to_response = dialect.stream_to_response if dialect else None
+        response_to_stream = dialect.response_to_stream if dialect else None
+        if (stream_to_response if upstream_stream else response_to_stream) is None:
+            raise HTTPException(
+                status_code=501,
+                detail=f"stream_mode={stream_mode} is not supported for {passthrough_ctx.dialect_id} passthrough",
+            )
+        logger.info(
+            f"[stream_mode/passthrough] {stream_mode}: client={'stream' if client_wants_stream else 'non-stream'}, "
+            f"upstream={'stream' if upstream_stream else 'non-stream'}, dialect={passthrough_ctx.dialect_id}, model={original_model}"
+        )
+
+    # 渠道 adapter 依据 request.stream 选择上游端点（如 streamRawPredict / rawPredict），
+    # 必须看到实际的上游形态，而不是客户端形态。
+    upstream_request = request if upstream_stream == client_wants_stream else request.model_copy(update={"stream": upstream_stream})
+
     channel = get_channel(engine)
     adapter = (channel.passthrough_adapter if channel else None) or (channel.request_adapter if channel else None)
     if not adapter:
@@ -539,29 +591,10 @@ async def process_request_passthrough(
 
     from core.http import proxy_context
     with proxy_context(proxy):
-        url, adapter_headers, _ = await adapter(request, engine, provider, api_key)
+        url, adapter_headers, _ = await adapter(upstream_request, engine, provider, api_key)
 
-    # ── 透传 URL 路径修正 ──
-    # passthrough_adapter 返回的 URL 对应方言的"主端点"（如 Claude 的 /messages）。
-    # 当入口请求是子路径（如 /v1/messages/count_tokens）时，需要追加路径后缀。
-    #
-    # 后缀从端点的 passthrough_root 显式配置计算，不依赖 adapter URL 的路径结构，
-    # 因此无论 base_url 配成什么样（如 https://proxy.com/anthropic/v1）都能正确工作。
-    if endpoint and passthrough_ctx.dialect_id:
-        from core.dialects.registry import get_dialect as _get_dialect
-        _dialect = _get_dialect(passthrough_ctx.dialect_id)
-        if _dialect:
-            # 查找匹配当前 endpoint 的透传根路径（显式配置，不依赖路由模板字符串）
-            _root = None
-            for _ep in _dialect.endpoints:
-                if _ep.passthrough_root and endpoint.startswith(_ep.passthrough_root):
-                    if _root is None or len(_ep.passthrough_root) > len(_root):
-                        _root = _ep.passthrough_root
-            # 用 passthrough_root 计算后缀：
-            # 例如 root="/v1/messages", endpoint="/v1/messages/count_tokens" → suffix="/count_tokens"
-            if _root and len(endpoint) > len(_root):
-                _suffix = endpoint[len(_root):]  # 如 "/count_tokens"
-                url = url.rstrip("/") + _suffix
+    if passthrough_suffix:
+        url = url.rstrip("/") + passthrough_suffix
 
     headers: Dict[str, Any] = dict(adapter_headers or {})
     apply_custom_headers(headers, _filter_passthrough_headers(passthrough_ctx.original_headers, provider))
@@ -587,7 +620,7 @@ async def process_request_passthrough(
         payload = await channel.passthrough_payload_adapter(
             payload,
             passthrough_ctx.modifications,
-            request,
+            upstream_request,
             engine,
             provider,
             api_key,
@@ -599,7 +632,7 @@ async def process_request_passthrough(
     # 目的：让透传流式和非流式响应都能执行 key_outbound 阶段。
     api_key_info = api_key_info or {}
     url, headers, payload = await apply_request_interceptors(
-        request, engine, provider, api_key, url, headers, payload, enabled_plugins
+        upstream_request, engine, provider, api_key, url, headers, payload, enabled_plugins
     )
 
     # 非生成子端点（如 count_tokens）：剥掉生成专属字段，防止 overrides 塞回的字段触发上游 400
@@ -651,23 +684,9 @@ async def process_request_passthrough(
     proxy = safe_get(app.state.config, "preferences", "proxy", default=None)
     proxy = safe_get(provider, "preferences", "proxy", default=proxy)
 
-    # 透传路径的 stream_mode 处理（与非透传路径对齐）
-    client_wants_stream = bool(request.stream)
-    if stream_mode == "force_stream":
-        upstream_stream = True
-    elif stream_mode == "force_non_stream":
-        upstream_stream = False
-    else:
-        upstream_stream = client_wants_stream
-
-    if upstream_stream and not client_wants_stream and stream_mode == "force_stream":
-        payload = dict(payload) if not isinstance(payload, dict) else {**payload}
-        payload["stream"] = True
-        logger.info(f"[stream_mode/passthrough] force_stream: client=non-stream, upstream=stream, model={original_model}")
-    elif not upstream_stream and client_wants_stream and stream_mode == "force_non_stream":
-        payload = dict(payload) if not isinstance(payload, dict) else {**payload}
-        payload["stream"] = False
-        logger.info(f"[stream_mode/passthrough] force_non_stream: client=stream, upstream=non-stream, model={original_model}")
+    # 客户端与上游形态不同时改写请求体的 stream；Gemini 用 URL 区分流式，请求体没有 stream 字段。
+    if upstream_stream != client_wants_stream and passthrough_ctx.dialect_id != "gemini":
+        payload = {**payload, "stream": upstream_stream}
 
     # Gemini/Vertex URL 适配
     if upstream_stream and "generateContent" in url and "streamGenerateContent" not in url:
@@ -740,9 +759,8 @@ async def process_request_passthrough(
                         debug=is_debug,
                     )
                 else:
-                    # force_stream 透传：上游流式 → 拼装成非流式 JSON
-                    from .stream_convert import assemble_stream_to_json
-                    assembled = await assemble_stream_to_json(wrapped_generator)
+                    # force_stream 透传：上游流式 → 按入口方言拼装成原生非流式 JSON
+                    assembled = await stream_to_response(wrapped_generator)
                     error = current_info.get("_stream_error") or extract_stream_error(assembled)
                     if error:
                         raise UpstreamStreamError(error)
@@ -800,15 +818,23 @@ async def process_request_passthrough(
                 )
 
                 if client_wants_stream:
-                    # force_non_stream 透传：上游非流式 → 拆成 SSE
-                    from .stream_convert import convert_json_to_sse
+                    # force_non_stream 透传：先读完并解析上游完整响应，再按入口方言拆成原生 SSE。
+                    # 在返回响应前完成解析与错误检查，异常仍能进入重试与状态码处理。
+                    from .stream_convert import parse_json_body
+                    chunks = [chunk async for chunk in wrapped_generator]
+                    try:
+                        complete_response = parse_json_body(chunks)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=502, detail=f"Upstream returned an invalid JSON response: {exc}")
+                    finally:
+                        chunks.clear()
+                    error = extract_stream_error(complete_response)
+                    if error:
+                        raise UpstreamStreamError(error)
 
                     async def force_non_stream_passthrough_iter():
-                        raw = b""
-                        async for chunk in wrapped_generator:
-                            raw += chunk if isinstance(chunk, bytes) else chunk.encode()
-                        async for sse_line in convert_json_to_sse(raw):
-                            yield sse_line
+                        async for frame in response_to_stream(complete_response, original_model):
+                            yield frame
 
                     response = LoggingStreamingResponse(
                         force_non_stream_passthrough_iter(),

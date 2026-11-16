@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from core.json_utils import json_loads, json_dumps_text
 from core.models import RequestModel
+from core.stream_convert import assemble_stream_to_json, convert_json_to_sse
 from core.usage import extract_cache_usage
 
 from .registry import DialectDefinition, EndpointDefinition, register_dialect
@@ -169,6 +170,8 @@ def register() -> None:
             render_response=render_openai_response,
             render_stream=render_openai_stream,
             parse_usage=parse_openai_usage,
+            stream_to_response=assemble_stream_to_json,
+            response_to_stream=convert_json_to_sse,
             target_engine=["openai", "openrouter"],
             endpoints=[
                 # POST /v1/chat/completions - Chat Completions
