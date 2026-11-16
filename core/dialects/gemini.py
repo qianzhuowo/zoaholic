@@ -8,12 +8,15 @@ Gemini 方言
 - endpoints: 自动注册的端点定义
 """
 
+import copy
 import json
 import asyncio
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from core.json_utils import json_loads, json_dumps_text
 from core.models import RequestModel, Message, ContentItem, ImageUrl
+from core.stream_convert import encode_sse, iter_sse_events
+from core.stream_errors import extract_stream_error
 from core.usage import extract_cache_usage
 
 from .registry import DialectDefinition, EndpointDefinition, register_dialect
@@ -525,6 +528,71 @@ def parse_gemini_usage(data: Any) -> Optional[Dict[str, int]]:
     return None
 
 
+# ============== 透传 stream_mode：Gemini 原生流式 <-> 非流式 ==============
+
+
+def _is_plain_text_part(part: Any) -> bool:
+    return isinstance(part, dict) and "text" in part and set(part) <= {"text", "thought", "thoughtSignature"}
+
+
+def _merge_gemini_parts(parts: List[Dict[str, Any]], part: Dict[str, Any]) -> None:
+    """将流式分片中的连续文本合并回非流式的单个 part，其余 part 原样追加。"""
+    previous = parts[-1] if parts else None
+    if (_is_plain_text_part(part) and _is_plain_text_part(previous)
+            and bool(part.get("thought")) == bool(previous.get("thought"))
+            and not (part.get("thoughtSignature") and previous.get("thoughtSignature"))):
+        previous["text"] = (previous.get("text") or "") + (part.get("text") or "")
+        if part.get("thoughtSignature"):
+            previous["thoughtSignature"] = part["thoughtSignature"]
+        return
+    parts.append(copy.deepcopy(part))
+
+
+async def assemble_gemini_stream(stream_generator) -> Dict[str, Any]:
+    """Gemini 原生 SSE（GenerateContentResponse 分片）-> 非流式 GenerateContentResponse。"""
+    response: Dict[str, Any] = {}
+    candidates: Dict[int, Dict[str, Any]] = {}
+
+    async for _event, data in iter_sse_events(stream_generator):
+        if not isinstance(data, dict):
+            continue
+        if extract_stream_error(data):
+            return data
+        for key, value in data.items():
+            if key != "candidates":
+                response[key] = value
+        for candidate in data.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            merged = candidates.setdefault(candidate.get("index", 0), {"content": {"role": "model", "parts": []}})
+            for key, value in candidate.items():
+                if key != "content" and value is not None:
+                    merged[key] = value
+            content = candidate.get("content") or {}
+            if content.get("role"):
+                merged["content"]["role"] = content["role"]
+            for part in content.get("parts") or []:
+                if isinstance(part, dict):
+                    _merge_gemini_parts(merged["content"]["parts"], part)
+
+    if not response and not candidates:
+        return {"error": {"code": 502, "status": "INTERNAL",
+                          "message": "Gemini stream ended without any response chunk"}}
+    result: Dict[str, Any] = {"candidates": [candidates[i] for i in sorted(candidates)]} if candidates else {}
+    result.update(response)
+    return result
+
+
+async def split_gemini_response(response: Dict[str, Any], model: str = ""):
+    """非流式 GenerateContentResponse -> Gemini 原生 SSE。
+
+    Gemini 流式分片与非流式响应同构，完整响应即一个合法的单分片流。
+    """
+    if not isinstance(response, dict):
+        raise TypeError(f"split_gemini_response expects a dict, got {type(response).__name__}")
+    yield encode_sse(response)
+
+
 # ============== 自定义端点处理函数 ==============
 
 
@@ -611,6 +679,8 @@ def register() -> None:
             render_response=render_gemini_response,
             render_stream=render_gemini_stream,
             parse_usage=parse_gemini_usage,
+            stream_to_response=assemble_gemini_stream,
+            response_to_stream=split_gemini_response,
             target_engine="gemini",
             structured_stream=True,  # Gemini 原生支持 inlineData，保留结构化 content
             extract_token=extract_gemini_token,

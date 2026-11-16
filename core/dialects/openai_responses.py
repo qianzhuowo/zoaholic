@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from core.json_utils import json_dumps_text
 from core.models import RequestModel, Message, ContentItem
+from core.stream_convert import encode_sse, iter_sse_events
+from core.stream_errors import extract_stream_error
 from core.usage import extract_cache_usage
 
 from .registry import DialectDefinition, EndpointDefinition, register_dialect
@@ -475,6 +477,115 @@ def _create_responses_stream_renderer():
     return create_responses_stream_renderer()
 
 
+# ============================================================
+# 透传 stream_mode：Responses 原生流式 <-> 非流式
+# ============================================================
+
+_RESPONSES_TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
+
+
+async def assemble_responses_stream(stream_generator) -> Dict[str, Any]:
+    """Responses 原生 SSE -> Response 对象（force_stream 透传）。
+
+    以终态事件携带的 response 为准；部分上游的终态 response.output 为空，
+    此时用 response.output_item.done 收集到的输出项补齐。
+    """
+    final: Optional[Dict[str, Any]] = None
+    items: Dict[int, Dict[str, Any]] = {}
+
+    async for event_type, data in iter_sse_events(stream_generator):
+        if not isinstance(data, dict):
+            continue
+        kind = data.get("type") or event_type
+        if kind == "error" or extract_stream_error(data):
+            return data
+        if kind == "response.output_item.done" and isinstance(data.get("item"), dict):
+            items[data.get("output_index", len(items))] = data["item"]
+        elif kind in _RESPONSES_TERMINAL_EVENTS and isinstance(data.get("response"), dict):
+            final = data["response"]
+
+    if final is None:
+        return {"error": {"type": "upstream_error",
+                          "message": "Responses stream ended without a terminal response event"},
+                "status_code": 502}
+    if not final.get("output") and items:
+        final = {**final, "output": [items[i] for i in sorted(items)]}
+    return final
+
+
+def _responses_item_events(index: int, item: Dict[str, Any], event):
+    item_id = item.get("id")
+    item_type = item.get("type")
+    pending = {**item, "status": "in_progress"} if "status" in item else dict(item)
+
+    if item_type == "message":
+        yield event("response.output_item.added", output_index=index, item={**pending, "content": []})
+        for content_index, part in enumerate(item.get("content") or []):
+            where = {"item_id": item_id, "output_index": index, "content_index": content_index}
+            part_type = part.get("type")
+            if part_type in ("output_text", "refusal"):
+                key = "text" if part_type == "output_text" else "refusal"
+                empty = {**part, key: ""}
+                if part_type == "output_text":
+                    empty["annotations"] = []
+                yield event("response.content_part.added", **where, part=empty)
+                if part.get(key):
+                    yield event(f"response.{part_type}.delta", **where, delta=part[key])
+                yield event(f"response.{part_type}.done", **where, **{key: part.get(key) or ""})
+            else:
+                yield event("response.content_part.added", **where, part=part)
+            yield event("response.content_part.done", **where, part=part)
+    elif item_type == "reasoning":
+        yield event("response.output_item.added", output_index=index, item={**pending, "summary": []})
+        for summary_index, part in enumerate(item.get("summary") or []):
+            where = {"item_id": item_id, "output_index": index, "summary_index": summary_index}
+            yield event("response.reasoning_summary_part.added", **where, part={**part, "text": ""})
+            if part.get("text"):
+                yield event("response.reasoning_summary_text.delta", **where, delta=part["text"])
+            yield event("response.reasoning_summary_text.done", **where, text=part.get("text") or "")
+            yield event("response.reasoning_summary_part.done", **where, part=part)
+    elif item_type == "function_call":
+        arguments = item.get("arguments") or ""
+        yield event("response.output_item.added", output_index=index, item={**pending, "arguments": ""})
+        where = {"item_id": item_id, "output_index": index}
+        if arguments:
+            yield event("response.function_call_arguments.delta", **where, delta=arguments)
+        yield event("response.function_call_arguments.done", **where, arguments=arguments)
+    else:
+        yield event("response.output_item.added", output_index=index, item=item)
+    yield event("response.output_item.done", output_index=index, item=item)
+
+
+async def split_responses_response(response: Dict[str, Any], model: str = ""):
+    """Response 对象 -> Responses 原生 SSE 事件序列（force_non_stream 透传）。"""
+    if not isinstance(response, dict):
+        raise TypeError(f"split_responses_response expects a dict, got {type(response).__name__}")
+
+    sequence = 0
+
+    def event(kind: str, **fields) -> str:
+        nonlocal sequence
+        frame = encode_sse({"type": kind, "sequence_number": sequence, **fields}, kind)
+        sequence += 1
+        return frame
+
+    status = response.get("status") or "completed"
+    if status == "failed":
+        yield event("response.failed", response=response)
+        return
+
+    pending = {**response, "status": "in_progress", "output": [], "usage": None}
+    pending.setdefault("model", model)
+    yield event("response.created", response=pending)
+    yield event("response.in_progress", response=pending)
+    for index, item in enumerate(response.get("output") or []):
+        if isinstance(item, dict):
+            for frame in _responses_item_events(index, item, event):
+                yield frame
+    terminal = "response.incomplete" if status == "incomplete" else "response.completed"
+    yield event(terminal, response=response)
+
+
 def register() -> None:
     """注册 OpenAI Responses API 方言"""
     register_dialect(
@@ -486,6 +597,8 @@ def register() -> None:
             render_response=render_responses_response,
             render_stream_factory=_create_responses_stream_renderer,
             parse_usage=parse_responses_usage,
+            stream_to_response=assemble_responses_stream,
+            response_to_stream=split_responses_response,
             target_engine="openai-responses",
             endpoints=[
                 EndpointDefinition(

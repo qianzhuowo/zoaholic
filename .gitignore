@@ -13,9 +13,11 @@ formatted.yaml
 api.json
 api.*.json
 
-# local config backups (contain real credentials)
-api.yaml.stale_*.bak
-api.yaml.*.bak
+# local config backups / variants (contain real credentials):
+# manual backups (api.yaml.bak-<ts>, api.yaml.stale_*.bak), atomic-write temp files (.api.yaml.*.tmp)
+api.yaml.*
+api.yml.*
+.api.yaml.*
 
 # runtime data / volumes
 data/
