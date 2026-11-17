@@ -34,7 +34,7 @@ from fastapi import HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
-from core.log_config import logger
+from core.log_config import logger, mask_secret
 from core.streaming import LoggingStreamingResponse
 from core.request import get_payload
 from core.response import fetch_response, fetch_response_stream, check_response
@@ -1347,10 +1347,9 @@ class ModelRequestHandler:
                 if "<head><title>413 Request Entity Too Large</title></head>" in error_message:
                     status_code = 429
 
-                # 修改原因：BYOK 失败日志不能输出用户真实上游 key。
-                # 修改方式：BYOK 请求只打印模板身份或空值，普通请求保留原有 current_api 便于排障。
-                # 目的：上游 401/403 等错误返回给用户即可，不在服务端日志泄露 BYOK key。
-                log_api_key = byok_template_key if (byok_real_key and is_byok_provider(provider)) else current_api
+                # 修改原因：失败日志不能输出真实上游 key（会落入 journal / 后台日志）。
+                # 修改方式：BYOK 请求只打印模板身份，普通请求打印脱敏后的 key，仍可区分是哪把 key。
+                log_api_key = byok_template_key if (byok_real_key and is_byok_provider(provider)) else mask_secret(current_api)
                 logger.error(f"Error {status_code} with provider {channel_id} API key: {log_api_key}: {error_message}")
                 import traceback
                 logger.error(f"[traceback] {traceback.format_exc()}")

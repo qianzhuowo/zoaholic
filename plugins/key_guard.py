@@ -40,6 +40,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException
 
+from core.log_config import mask_secret
 from core.plugins.interceptors import parse_plugin_entry, register_inbound_interceptor
 
 
@@ -537,7 +538,7 @@ def _strip_tool_choice(request_data: Any) -> None:
 
 
 def _reject(config: Dict[str, Any], api_key: str, reason: str) -> None:
-    logger.warning(f"[key_guard] rejected key {api_key}... reason={reason}")
+    logger.warning(f"[key_guard] rejected key {api_key} reason={reason}")
     raise HTTPException(
         status_code=config.get("reject_status", DEFAULT_REJECT_STATUS),
         detail=config.get("reject_message", DEFAULT_REJECT_MESSAGE),
@@ -550,7 +551,7 @@ def _check_allowed_ua(config: Dict[str, Any], headers: Dict[str, str], api_key: 
         return
     ua = _get_ua(headers)
     if not any(keyword in ua for keyword in allowed_ua):
-        logger.warning(f"[key_guard] UA not in whitelist for key {api_key}... (UA: {ua[:80]}), allowed: {allowed_ua}")
+        logger.warning(f"[key_guard] UA not in whitelist for key {api_key} (UA: {ua[:80]}), allowed: {allowed_ua}")
         _reject(config, api_key, "ua_not_allowed")
 
 
@@ -616,10 +617,10 @@ def _check_tools(config: Dict[str, Any], request_data: Any, api_key: str) -> Non
         _reject(config, api_key, "tools_required")
     if tools_policy == "strip" and has_tools:
         _strip_tools(request_data)
-        logger.info(f"[key_guard] Stripped tools for key {api_key}...")
+        logger.info(f"[key_guard] Stripped tools for key {api_key}")
     elif tool_choice_policy == "strip" and has_tool_choice:
         _strip_tool_choice(request_data)
-        logger.info(f"[key_guard] Stripped tool_choice for key {api_key}...")
+        logger.info(f"[key_guard] Stripped tool_choice for key {api_key}")
 
 
 async def key_guard_interceptor(request_data, request, api_key_info, enabled_plugins):
@@ -627,7 +628,7 @@ async def key_guard_interceptor(request_data, request, api_key_info, enabled_plu
         return request_data
 
     config = _parse_opts(enabled_plugins)
-    api_key = (api_key_info.get("api_key", "???") if api_key_info else "???")[:15]
+    api_key = mask_secret(api_key_info.get("api_key") if api_key_info else None)
     headers = _header_map(request, api_key_info)
 
     _check_allowed_ua(config, headers, api_key)

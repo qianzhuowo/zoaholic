@@ -35,6 +35,14 @@ _PREFIX_LEVEL_PATTERN = re.compile(
 )
 
 
+def mask_secret(value: Any) -> str:
+    """Render a credential for logs: enough to tell keys apart, never the key itself."""
+    text = str(value or "")
+    if len(text) <= 12:
+        return "***"
+    return f"{text[:6]}...{text[-4:]}"
+
+
 def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
