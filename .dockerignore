@@ -7,6 +7,17 @@
 !tests/fixtures/*.pem
 api.json
 *.yaml
+# Config backups / variants carry real credentials but do not end with .yaml
+api.yml
+api.yaml.*
+api.yml.*
+.api.yaml.*
+api.*.json
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
 .env
 __pycache__
 .vscode
@@ -124,3 +135,19 @@ core/test/local/
 core/test/scratch/
 zoaholic-ca-build-*.tar.gz
 tls-verification*.json
+
+# Local AI tool state and incident/case reports (may contain live hosts and keys)
+.claude/
+.cursor/
+.codex/
+.agents/
+/tests/*.json
+/tests/*.txt
+/tests/*.js
+/tests/*.har
+/repro*.*
+thread_dumps/
+config_backups/
+oauth_recovery/
+runtime_disabled_keys.json
+runtime_quota_snapshot.json

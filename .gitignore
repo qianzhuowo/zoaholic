@@ -182,3 +182,21 @@ id_ecdsa*
 .cursor/
 .codex/
 .agents/
+
+# Local incident / case reports and repro artifacts.
+# They often contain live hosts, gateway keys, client IPs or captured payloads; keep them out of git.
+# Formal tests in tests/ (test_*.py, fixtures/) remain versioned.
+/tests/*.md
+/tests/*.json
+/tests/*.txt
+/tests/*.js
+/tests/*.har
+*案例报告*
+/repro*.*
+
+# Runtime state written outside data/ when DATA_DIR / working dir is misconfigured
+/thread_dumps/
+/config_backups/
+/oauth_recovery/
+/runtime_disabled_keys.json
+/runtime_quota_snapshot.json

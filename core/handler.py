@@ -1090,14 +1090,11 @@ class ModelRequestHandler:
 
                 # 根据异常类型设置状态码和错误消息
                 if isinstance(e, httpx.ReadTimeout):
-                    status_code = 504  # Gateway Timeout
-                    _req_obj = getattr(e, "_request", None)
-                    timeout_value = (
-                        _req_obj.extensions.get("timeout", {}).get("read", -1)
-                        if _req_obj is not None and hasattr(_req_obj, "extensions")
-                        else (stream_header_timeout or local_timeout_value)
-                    )
-                    error_message = str(e) if "Stream header/first-byte timeout" in str(e) else f"Request timed out after {timeout_value} seconds"
+                    # 修改原因：网关部署在 Cloudflare 后时，源站返回的 502/504 会被替换成 Cloudflare 自己的错误页，客户端看不到 JSON 错误。
+                    # 修改方式：上游超时统一返回 500 + "Request timed out"；具体超时阶段保留在 retry_path 与 traceback 日志中。
+                    # 目的：超时错误能原样到达客户端，且错误原因简洁一致。
+                    status_code = 500
+                    error_message = "Request timed out"
                 elif isinstance(e, httpx.ConnectError):
                     status_code = 503  # Service Unavailable
                     error_message = "Unable to connect to service"

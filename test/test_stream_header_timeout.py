@@ -243,6 +243,74 @@ async def test_stream_header_timeout_exceeded_rotates_to_next_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_header_timeout_returns_500_request_timed_out(monkeypatch):
+    """上游首字节超时且不再重试时，网关返回 500 + Request timed out（避免 504 被 Cloudflare 替换为自身错误页）。"""
+    provider = {
+        "provider": "timeout-500",
+        "engine": "openai-responses",
+        "model": ["test"],
+        "_model_dict_cache": {"test": "test"},
+        "api": ["hung-key"],
+        "preferences": {},
+    }
+    pool = ThreadSafeCircularList(["hung-key"])
+    monkeypatch.setattr("core.key_pool._save_all_auto_disabled", lambda: None)
+    from core.utils import provider_api_circular_list
+    monkeypatch.setitem(provider_api_circular_list, "timeout-500", pool)
+
+    async def upstream(request):
+        await asyncio.sleep(5.0)
+        return httpx.Response(200, text="late")
+
+    info = {
+        "provider": "timeout-500", "provider_id": "timeout-500", "_provider_cfg": provider,
+        "client_ip": "test-client", "success": True, "status_code": 200,
+        "start_time": time(), "request_id": "req-1", "api_key": "client-k", "model": "test",
+    }
+    monkeypatch.setattr("core.handler._fire_and_forget_channel_stats", lambda *a, **kw: None)
+    monkeypatch.setattr("core.handler.enqueue_stats", lambda *a, **kw: None)
+    monkeypatch.setattr("core.streaming.enqueue_stats", lambda *a, **kw: None)
+
+    token = request_info.set(info)
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            class ClientManager:
+                @asynccontextmanager
+                async def get_client(self, *args):
+                    yield client
+
+            class _App:
+                pass
+            app = _App()
+            app.state = SimpleNamespace(
+                    config={"preferences": {}, "providers": [provider]},
+                    client_manager=ClientManager(),
+                    error_triggers=[],
+                    provider_timeouts={"global": {"default": 10}},
+                    keepalive_interval={"global": {"default": 1}},
+                    stream_header_timeouts={"global": {"default": 0.05}},
+                    channel_manager=SimpleNamespace(cooldown_period=0),
+            )
+            handler = ModelRequestHandler(app, lambda: info, AsyncMock())
+            resp = await handler.request_model(
+                RequestModel(model="test", stream=True, messages=[{"role": "user", "content": "hi"}]),
+                0,
+                BackgroundTasks(),
+                endpoint="/v1/responses",
+                override_providers=[provider],
+                override_auto_retry=False,
+                dialect_id="openai-responses",
+                original_payload={"model": "test", "input": "hi", "stream": True},
+            )
+            assert resp.status_code == 500
+            body = json.loads(resp.body)
+            assert body["error"]["message"].endswith("Request timed out")
+            assert info["status_code"] == 500
+    finally:
+        request_info.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_gemini_empty_retry_sticky_ip_rotates_key_after_long_thought(monkeypatch):
     """验证 gemini_empty_retry 在 sticky_ip 渠道下思考空回后，会先冷却前一把 Key 再调用 pool.next() 切换到下一把 Key。"""
     from plugins.gemini_empty_retry import _prepare_retry_credentials
